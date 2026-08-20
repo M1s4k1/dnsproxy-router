@@ -1,17 +1,18 @@
 # dnsproxy-scheduler
 
-一个对外只提供 DoH 的 DNS 代理，内部对多家上游服务商做「动态择优 + 并发赛马」。
+一个对外提供 **DoH / DoT / DoQ / 明文 DNS** 的 DNS 代理，内部对多家上游服务商做「动态择优 + 并发赛马」。
 
-基于 [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) 库构建，只额外实现调度层与 ECS 策略，DNS 编解码、DoH 前端、缓存、去重均由成熟库承担。
+基于 [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) 库构建，只额外实现调度层与 ECS 策略，DNS 编解码、各协议前端、缓存、去重均由成熟库承担。
 
 ## 特性
 
+- **多协议入站**：入站监听支持 DoH / DoT / DoQ / 明文 DNS（UDP+TCP），各自独立开关与端口。
 - **动态择优**：周期性探测每家上游各模式的延迟，自动为每家选出延迟最低的模式。
 - **并发赛马**：每次查询向各家「当前最优线路」并发发出，谁先成功返回就用谁。
 - **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
 - **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
 - **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
-- **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC。
+- **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS（明文 IPv4/IPv6）。
 
 ## 目录结构
 
@@ -22,7 +23,7 @@ dnsproxy/
 │   ├── config/                 # YAML 配置的加载与校验
 │   ├── ecs/                    # EDNS Client Subnet 策略
 │   ├── scheduler/              # 周期性探测 + 选路 + 连接复用
-│   └── handler/                # 把选路注入每个 DoH 请求（赛马）
+│   └── handler/                # 把选路注入每个请求（赛马）
 ├── config.example.yaml         # 配置示例（复制为 config.yaml 后使用）
 ├── interactive-setup.sh        # 交互式部署脚本（服务器上运行）
 └── go.mod / go.sum
@@ -39,11 +40,11 @@ dnsproxy/
                  └─────────────────────────────────────────────┘
                                     │ 更新选路
                                     ▼
-  客户端 ──DoH──▶ {port}/{doh_path} ──▶ 多家并发赛马 ──▶ 最快者返回
+  客户端 ──DoH/DoT/DoQ/明文──▶ 多家并发赛马 ──▶ 最快者返回
 ```
 
 - **外层（scheduler）**：每 `probe_interval`（默认 15m）探测，每家各模式探测 `probe_count` 次取中位数 RTT，选出每家延迟最低的模式。
-- **内层（赛马）**：每次收到 DoH 查询，向各家「当前最优线路」并发查询，谁先成功返回就用谁（`proxy.UpstreamModeParallel`）。
+- **内层（赛马）**：每次收到查询，向各家「当前最优线路」并发查询，谁先成功返回就用谁（`proxy.UpstreamModeParallel`）。
 
 ## 快速开始
 
@@ -73,18 +74,33 @@ bash /root/interactive-setup.sh
 
 > 脚本默认在「脚本同目录」下查找二进制（`dnsproxy-scheduler`），所以把二进制和脚本都放到 `/root/` 后，无需再传位置参数。
 
-脚本会一步步引导你：**域名/端口 → DoH 路径 → ECS 策略 → 证书方式 → 探测参数 → 上游 DNS**，然后自动完成：生成 `config.yaml` → 安装二进制到 `/usr/local/bin/` → 申请证书（acme.sh + DNS-01）→ 写 systemd 单元 → 启动服务。
+脚本会一步步引导你：**入站监听（每种协议是否开启 + 端口）→ 域名/证书 → ECS 策略 → 探测参数 → 缓存与引导 → 上游 DNS**，然后自动完成：生成 `config.yaml` → 安装二进制到 `/usr/local/bin/` → 申请证书（acme.sh + DNS-01，仅加密协议开启时）→ 写 systemd 单元 → 启动服务。
 
 > 脚本**不做编译**，只做「填配置 + 部署」。所以必须先完成第 ① 步拿到二进制。
 
 ### 验证
+
+**DoH**（HTTP/2 + 二进制 DNS 报文）：
 
 ```bash
 curl -H 'accept: application/dns-message' \
   'https://你的域名/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | xxd | head
 ```
 
-返回二进制 DNS 报文即为正常。`dns-query` 换成你配置的 `doh_path` 即可；该路径支持多层子路径（如 `/dns/query/v1`）。若配置了非 443 端口，URL 需补上 `:端口`。
+**DoT / DoQ**：
+
+```bash
+kdig -d @你的域名 +tls-ca +tls-host=你的域名 example.com A   # DoT
+kdig -d @你的域名 +quic example.com A                        # DoQ
+```
+
+**明文 DNS**：
+
+```bash
+dig @你的域名 example.com A
+```
+
+返回二进制 DNS 报文即为正常。`dns-query` 换成你配置的 DoH `path`（支持多层子路径，如 `/dns/query/v1`）。若配置了非默认端口，URL/命令需补上 `:端口`。
 
 ## 配置
 
@@ -94,8 +110,10 @@ curl -H 'accept: application/dns-message' \
 | --- | --- | --- |
 | `use_domain` | 是否使用域名（证书申请） | `true` |
 | `domain` | 服务域名 | `example.com` |
-| `port` | 对外 DoH 监听端口（DoH 标准 443） | `443` |
-| `doh_path` | DoH 端点路径（可自定义，支持多层） | `/dns-query` |
+| `listeners.doh` | DoH 入站：`enabled` / `port`（443） / `path`（`/dns-query`） | 开启 |
+| `listeners.dot` | DoT 入站：`enabled` / `port`（853） | 关闭 |
+| `listeners.doq` | DoQ 入站：`enabled` / `port`（853） | 关闭 |
+| `listeners.plain_dns` | 明文 DNS 入站：`enabled` / `port`（53，UDP+TCP 同端口） | 关闭 |
 | `ecs.mode` | ECS 策略：`off`（移除）\| `pass`（透传）\| `override`（覆写） | `off` |
 | `ecs.address` | `override` 模式的固定前缀（如 `223.5.5.0/24`） | — |
 | `cert.mode` | `acme`（申请+续期）\| `existing`（已有证书） | `acme` |
@@ -113,6 +131,30 @@ curl -H 'accept: application/dns-message' \
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（0 关闭） | `5s` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
 
+### `listeners` 字段：入站监听
+
+四种入站协议，各自独立开关与端口。加密协议（DoH/DoT/DoQ）共享同一 TLS 证书；明文 DNS 无需证书。
+
+```yaml
+listeners:
+  doh:
+    enabled: true
+    port: 443
+    path: "/dns-query"   # 仅 DoH 使用，可自定义多层子路径
+  dot:
+    enabled: false
+    port: 853
+  doq:
+    enabled: false
+    port: 853
+  plain_dns:             # 同时监听 UDP 与 TCP 同一端口
+    enabled: false
+    port: 53
+```
+
+- 至少开启一种；`NeedsTLS`（DoH/DoT/DoQ 任一开启）时才需要配置 `cert`。
+- 明文 DNS 属无加密、易被劫持，一般仅建议在内网/可信网络，或作为兜底使用。
+
 ### `dns` 字段：服务商 → 模式 → 地址
 
 项目**不内置任何上游端点**，请自行配置。示例（把地址替换成你自己的）：
@@ -123,14 +165,15 @@ dns:
     DNS-over-HTTPS: "https://dns.example.com/dns-query"
     DNS-over-TLS:   "tls://dns.example.com:853"
     DNS-over-QUIC:  "quic://dns.example.com:853"
+    Plain DNS:      "udp://dns.example.com:53"
   provider-b:
     DNS-over-HTTPS: "https://dns.example.net/dns-query"
 ```
 
 - 服务商数量、每家支持的模式种类均任意。
-- 模式键固定为 `DNS-over-HTTPS` / `DNS-over-TLS` / `DNS-over-QUIC`。
-- 地址格式遵循 dnsproxy 语法：`https://host/dns-query`、`tls://host:853`、`quic://host:853`。
-- 使用交互脚本时，上游地址可省略前缀/端口/路径（脚本自动补全为 `https://host:443/dns-query`、`tls://host:853`、`quic://host:853`）；手写配置文件则需按上面的完整格式。
+- 模式键固定为 `DNS-over-HTTPS` / `DNS-over-TLS` / `DNS-over-QUIC` / `Plain DNS`。
+- 地址格式遵循 dnsproxy 语法：`https://host/dns-query`、`tls://host:853`、`quic://host:853`、`udp://host:53`（`tcp://` 亦支持）。
+- 使用交互脚本时，上游地址可省略前缀/端口/路径（脚本自动补全为 `https://host:443/dns-query`、`tls://host:853`、`quic://host:853`、`udp://host:53`）；手写配置文件则需按上面的完整格式。
 
 ### `ecs` 字段：EDNS Client Subnet 策略
 
@@ -184,7 +227,7 @@ ExecStart=/usr/local/bin/dnsproxy-scheduler -config /etc/dnsproxy/config.yaml
 Restart=always
 ```
 
-- 在服务器防火墙 / 云安全组放行 `${port}/TCP`（默认 443）。
+- 在服务器防火墙 / 云安全组放行你所开启协议的端口：DoH=`443/tcp`、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
 
 ### 运维命令
 
@@ -198,4 +241,4 @@ systemctl restart dnsproxy-scheduler     # 重启（改配置后）
 
 - 每轮探测后，若各家最优线路未变化，则**复用**既有连接（热 TLS/QUIC/TCP 池）与缓存，无冷启动；仅当某家线路切换时才对退役线路重建并延迟关闭旧连接。
 - acme 模式下证书由 acme.sh 自动续期，续期后通过 `--reloadcmd` 重启服务加载新证书。
-- 默认监听 443（DoH 标准端口），属于特权端口（< 1024），需 root 运行；若改用非特权端口可非 root 运行。
+- 默认端口 443（DoH）/ 853（DoT、DoQ）/ 53（明文）均属特权端口（< 1024），需 root 运行；若改用非特权端口可非 root 运行。

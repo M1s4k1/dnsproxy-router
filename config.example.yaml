@@ -7,11 +7,22 @@
 use_domain: true
 domain: "example.com"
 
-# 对外 DoH 监听端口
-port: 443
-
-# DoH 端点请求路径（可自定义，支持多层子路径，如 /dns/query/v1）
-doh_path: "/dns-query"
+# 入站监听：四种协议，各自独立开关与端口（path 仅 DoH 使用）
+# 加密协议（DoH/DoT/DoQ）需要 cert 证书；明文（plain_dns）不需要。
+listeners:
+  doh:
+    enabled: true
+    port: 443
+    path: "/dns-query"   # DoH 端点请求路径（可自定义，支持多层子路径）
+  dot:
+    enabled: false
+    port: 853
+  doq:
+    enabled: false
+    port: 853
+  plain_dns:             # 明文 DNS，同时监听 UDP 与 TCP 同一端口
+    enabled: false
+    port: 53
 
 # EDNS Client Subnet 策略
 # mode: off（移除 EDNS）| pass（透传）| override（覆写为固定前缀）
@@ -48,8 +59,8 @@ bootstrap:
 bootstrap_cache_ttl: 5s
 
 # 上游服务商 → 查询模式 → 地址
-# 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC
-# 地址格式：https://host/dns-query | tls://host:853 | quic://host:853
+# 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
+# 地址格式：https://host/dns-query | tls://host:853 | quic://host:853 | udp://host:53
 #
 # 必填：在此配置你自己的上游（每个服务商可配一种或多种模式）。
 # 把下面示例中的值替换成你的真实端点后取消注释：
@@ -57,4 +68,5 @@ bootstrap_cache_ttl: 5s
 #     DNS-over-HTTPS: "https://dns.example.com/dns-query"
 #     DNS-over-TLS:   "tls://dns.example.com:853"
 #     DNS-over-QUIC:  "quic://dns.example.com:853"
+#     Plain DNS:      "udp://8.8.8.8:53"
 dns: {}

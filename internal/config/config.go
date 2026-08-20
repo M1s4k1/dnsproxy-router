@@ -35,16 +35,37 @@ type ECSConfig struct {
 	Address string `yaml:"address"`
 }
 
+// ListenerConfig 描述一种入站监听协议。
+type ListenerConfig struct {
+	// Enabled: 是否开启该入站监听。
+	Enabled bool `yaml:"enabled"`
+	// Port: 监听端口（各协议有各自默认值）。
+	Port int `yaml:"port"`
+	// Path: 仅 DoH 使用，为 DoH 端点请求路径。
+	Path string `yaml:"path"`
+}
+
+// ListenersConfig 描述入站监听：DoH / DoT / DoQ / 明文 DNS（UDP+TCP）。
+type ListenersConfig struct {
+	DoH      ListenerConfig `yaml:"doh"`
+	DoT      ListenerConfig `yaml:"dot"`
+	DoQ      ListenerConfig `yaml:"doq"`
+	PlainDNS ListenerConfig `yaml:"plain_dns"`
+}
+
+// NeedsTLS 报告是否需要 TLS 证书：DoH/DoT/DoQ 任一开启即需要。
+func (l ListenersConfig) NeedsTLS() bool {
+	return l.DoH.Enabled || l.DoT.Enabled || l.DoQ.Enabled
+}
+
 // Config 是服务的完整配置，同时被 Go 程序与交互式脚本消费。
 type Config struct {
 	// Domain: 服务域名（用于证书申请与验证）。
 	Domain string `yaml:"domain"`
 	// UseDomain: 是否使用域名（true 时用域名签发证书）。
 	UseDomain bool `yaml:"use_domain"`
-	// Port: 对外 DoH 监听端口。
-	Port int `yaml:"port"`
-	// DoHPath: DoH 端点请求路径，可自定义为任意层级（如 /dns/query/v1）。
-	DoHPath string `yaml:"doh_path"`
+	// Listeners: 入站监听配置。
+	Listeners ListenersConfig `yaml:"listeners"`
 	// ECS: EDNS Client Subnet 处理策略。
 	ECS ECSConfig `yaml:"ecs"`
 	// Cert: 证书配置。
@@ -66,13 +87,8 @@ type Config struct {
 	// BootstrapCacheTTL: 引导解析结果的缓存时长（0 表示不缓存）。
 	BootstrapCacheTTL time.Duration `yaml:"bootstrap_cache_ttl"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
-	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC"。
+	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
-}
-
-// ListenAddr 返回对外监听地址（始终监听所有网卡）。
-func (c Config) ListenAddr() string {
-	return fmt.Sprintf("0.0.0.0:%d", c.Port)
 }
 
 // boolPtr 返回指向 b 的指针，用于构造可选 bool 字段的默认值。
@@ -102,9 +118,13 @@ func DefaultConfig() Config {
 	return Config{
 		Domain:    "example.com",
 		UseDomain: true,
-		Port:      443,
-		DoHPath:   "/dns-query",
-		ECS:       ECSConfig{Mode: "off", Address: ""},
+		Listeners: ListenersConfig{
+			DoH:      ListenerConfig{Enabled: true, Port: 443, Path: "/dns-query"},
+			DoT:      ListenerConfig{Enabled: false, Port: 853},
+			DoQ:      ListenerConfig{Enabled: false, Port: 853},
+			PlainDNS: ListenerConfig{Enabled: false, Port: 53},
+		},
+		ECS: ECSConfig{Mode: "off", Address: ""},
 		Cert: CertConfig{
 			Mode:     "acme",
 			Renew:    true,
@@ -143,15 +163,57 @@ func LoadConfig(path string) (Config, error) {
 	return c, nil
 }
 
+// defaultPort 返回入站监听协议的默认端口。
+func defaultPort(l ListenerConfig, def int) int {
+	if l.Port <= 0 {
+		return def
+	}
+	return l.Port
+}
+
+// validateListeners 校验入站监听配置：至少开启一种，端口合法。
+func (c *Config) validateListeners() error {
+	c.Listeners.DoH.Port = defaultPort(c.Listeners.DoH, 443)
+	c.Listeners.DoT.Port = defaultPort(c.Listeners.DoT, 853)
+	c.Listeners.DoQ.Port = defaultPort(c.Listeners.DoQ, 853)
+	c.Listeners.PlainDNS.Port = defaultPort(c.Listeners.PlainDNS, 53)
+
+	if !c.Listeners.DoH.Enabled && !c.Listeners.DoT.Enabled &&
+		!c.Listeners.DoQ.Enabled && !c.Listeners.PlainDNS.Enabled {
+		return fmt.Errorf("至少开启一种入站监听（doh/dot/doq/plain_dns）")
+	}
+
+	validatePort := func(name string, l ListenerConfig) error {
+		if l.Enabled && (l.Port < 1 || l.Port > 65535) {
+			return fmt.Errorf("%s 端口非法：%d", name, l.Port)
+		}
+		return nil
+	}
+	for name, l := range map[string]ListenerConfig{
+		"listeners.doh":       c.Listeners.DoH,
+		"listeners.dot":       c.Listeners.DoT,
+		"listeners.doq":       c.Listeners.DoQ,
+		"listeners.plain_dns": c.Listeners.PlainDNS,
+	} {
+		if err := validatePort(name, l); err != nil {
+			return err
+		}
+	}
+
+	if c.Listeners.DoH.Enabled {
+		if c.Listeners.DoH.Path == "" {
+			c.Listeners.DoH.Path = "/dns-query"
+		}
+		if err := validateDoHPath(c.Listeners.DoH.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // normalize 校验并补全默认值。
 func (c *Config) normalize() error {
-	if c.Port <= 0 {
-		c.Port = 443
-	}
-	if c.DoHPath == "" {
-		c.DoHPath = "/dns-query"
-	}
-	if err := validateDoHPath(c.DoHPath); err != nil {
+	if err := c.validateListeners(); err != nil {
 		return err
 	}
 	if c.ECS.Mode == "" {
@@ -160,11 +222,14 @@ func (c *Config) normalize() error {
 	if _, err := ecs.New(c.ECS.Mode, c.ECS.Address); err != nil {
 		return err
 	}
-	if c.Cert.CertPath == "" || c.Cert.KeyPath == "" {
-		return fmt.Errorf("cert.cert_path 和 cert.key_path 不能为空")
-	}
-	if c.Cert.Mode != "acme" && c.Cert.Mode != "existing" {
-		return fmt.Errorf("cert.mode 必须为 acme 或 existing，当前为 %q", c.Cert.Mode)
+	// 仅当需要 TLS（DoH/DoT/DoQ 任一开启）时才校验证书路径。
+	if c.Listeners.NeedsTLS() {
+		if c.Cert.CertPath == "" || c.Cert.KeyPath == "" {
+			return fmt.Errorf("cert.cert_path 和 cert.key_path 不能为空")
+		}
+		if c.Cert.Mode != "acme" && c.Cert.Mode != "existing" {
+			return fmt.Errorf("cert.mode 必须为 acme 或 existing，当前为 %q", c.Cert.Mode)
+		}
 	}
 	if c.ProbeInterval <= 0 {
 		c.ProbeInterval = 15 * time.Minute
