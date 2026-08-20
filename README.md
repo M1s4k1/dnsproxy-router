@@ -61,15 +61,17 @@ GOOS=linux GOARCH=arm64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # arm64
 ### ② 上传二进制和脚本到服务器
 
 ```bash
-scp dnsproxy-scheduler interactive-setup.sh root@SERVER_IP:/tmp/
+scp dnsproxy-scheduler interactive-setup.sh root@SERVER_IP:/root/
 ```
 
 ### ③ 在服务器上跑交互脚本（完成部署）
 
 ```bash
 ssh root@SERVER_IP
-bash /tmp/interactive-setup.sh /tmp/dnsproxy-scheduler
+bash /root/interactive-setup.sh
 ```
+
+> 脚本默认在「脚本同目录」下查找二进制（`dnsproxy-scheduler`），所以把二进制和脚本都放到 `/root/` 后，无需再传位置参数。
 
 脚本会一步步引导你：**域名/端口 → DoH 路径 → ECS 策略 → 证书方式 → 探测参数 → 上游 DNS**，然后自动完成：生成 `config.yaml` → 安装二进制到 `/usr/local/bin/` → 申请证书（acme.sh + DNS-01）→ 写 systemd 单元 → 启动服务。
 
@@ -128,6 +130,7 @@ dns:
 - 服务商数量、每家支持的模式种类均任意。
 - 模式键固定为 `DNS-over-HTTPS` / `DNS-over-TLS` / `DNS-over-QUIC`。
 - 地址格式遵循 dnsproxy 语法：`https://host/dns-query`、`tls://host:853`、`quic://host:853`。
+- 使用交互脚本时，上游地址可省略前缀/端口/路径（脚本自动补全为 `https://host:443/dns-query`、`tls://host:853`、`quic://host:853`）；手写配置文件则需按上面的完整格式。
 
 ### `ecs` 字段：EDNS Client Subnet 策略
 
