@@ -3,9 +3,13 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"dnsproxy-scheduler/internal/ecs"
@@ -94,8 +98,11 @@ type Config struct {
 	// Hosts: 上游域名 → IP 静态映射，命中即直接用给定 IP，不再走引导 DNS。
 	// 键为域名（可带点），值为 IP 列表（IPv4/IPv6 均可）。
 	Hosts map[string][]string `yaml:"hosts"`
-	// PreferIPv6: 域名同时有 IPv4/IPv6 时，是否优先使用 IPv6（连接失败自动回退另一族）。
-	PreferIPv6 bool `yaml:"prefer_ipv6"`
+	// IPPriority: 上游域名同时有 IPv4/IPv6 时的地址族优先级：
+	// "ipv4"（IPv4 优先）/ "ipv6"（IPv6 优先）/ "latency"（按延迟动态选族）。
+	IPPriority string `yaml:"ip_priority"`
+	// IPLatencyInterval: ip_priority=latency 时，重新探测各地址族延迟的周期。
+	IPLatencyInterval time.Duration `yaml:"ip_latency_interval"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
 	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
@@ -155,7 +162,9 @@ func DefaultConfig() Config {
 		// Hosts 默认留空：域名→IP 静态映射属用户私密配置，请通过 config.yaml
 		// 或 interactive-setup.sh 自行填写。
 		Hosts: map[string][]string{},
-		// PreferIPv6 默认 false（IPv4 优先）。
+		// IPPriority 默认 ipv4（IPv4 优先）。
+		IPPriority:        "ipv4",
+		IPLatencyInterval: 15 * time.Minute,
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
 		// interactive-setup.sh 自行填写（空值会被 LoadConfig 校验拒绝）。
@@ -282,6 +291,17 @@ func (c *Config) normalize() error {
 	if err := c.validateHosts(); err != nil {
 		return err
 	}
+	if c.IPPriority == "" {
+		c.IPPriority = "ipv4"
+	}
+	switch c.IPPriority {
+	case "ipv4", "ipv6", "latency":
+	default:
+		return fmt.Errorf("ip_priority 必须为 ipv4/ipv6/latency，当前为 %q", c.IPPriority)
+	}
+	if c.IPLatencyInterval <= 0 {
+		c.IPLatencyInterval = 15 * time.Minute
+	}
 	if len(c.DNS) == 0 {
 		return fmt.Errorf("dns 不能为空")
 	}
@@ -312,4 +332,87 @@ func (c *Config) validateHosts() error {
 		}
 	}
 	return nil
+}
+
+// UpstreamTarget 是一个「按延迟选族」的探测目标：主机名 + 端口。
+type UpstreamTarget struct {
+	Host string
+	Port uint16
+}
+
+// UpstreamTargets 返回所有上游探测目标（去重），用于「按延迟选族」。
+// 来源有二：dns 各模式地址里提取出的主机名+端口，以及 hosts 静态映射的键
+// （其端口取自 dns 中同名主机；未出现时默认 443）。
+func (c *Config) UpstreamTargets() []UpstreamTarget {
+	seen := make(map[string]UpstreamTarget)
+
+	for _, modes := range c.DNS {
+		for _, addr := range modes {
+			if t, ok := targetFromAddr(addr); ok {
+				seen[strings.ToLower(t.Host)] = t
+			}
+		}
+	}
+	for name := range c.Hosts {
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; !ok {
+			seen[key] = UpstreamTarget{Host: key, Port: 443}
+		}
+	}
+
+	targets := make([]UpstreamTarget, 0, len(seen))
+	for _, t := range seen {
+		targets = append(targets, t)
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Host < targets[j].Host })
+	return targets
+}
+
+// targetFromAddr 从上游地址提取「主机名+端口」。地址形如
+// https://host:443/dns-query、tls://host:853、quic://host:853、udp://1.1.1.1:53。
+// 主机为 IP 时返回 ok=false（无需探测）。
+func targetFromAddr(addr string) (UpstreamTarget, bool) {
+	scheme := ""
+	rest := addr
+	if i := strings.Index(addr, "://"); i >= 0 {
+		scheme = addr[:i]
+		rest = addr[i+3:]
+	}
+	// 去掉路径。
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+
+	// 拆分 host 与 port。
+	host, portStr := rest, ""
+	if h, p, err := net.SplitHostPort(rest); err == nil {
+		host, portStr = h, p
+	} else if i := strings.LastIndexByte(rest, ':'); i > 0 && strings.Count(rest, ":") == 1 {
+		host, portStr = rest[:i], rest[i+1:]
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return UpstreamTarget{}, false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return UpstreamTarget{}, false // 主机名本身是 IP
+	}
+
+	port := defaultPortForScheme(scheme)
+	if p, err := strconv.ParseUint(portStr, 10, 16); err == nil {
+		port = uint16(p)
+	}
+	return UpstreamTarget{Host: host, Port: port}, true
+}
+
+// defaultPortForScheme 返回各 scheme 的默认端口；未知 scheme 用 443。
+func defaultPortForScheme(scheme string) uint16 {
+	switch scheme {
+	case "tls", "quic", "h3":
+		return 853
+	case "udp", "tcp":
+		return 53
+	default:
+		return 443
+	}
 }

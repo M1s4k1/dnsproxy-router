@@ -19,6 +19,7 @@ import (
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 
+	"dnsproxy-scheduler/internal/afp"
 	bootstrapcache "dnsproxy-scheduler/internal/bootstrap"
 	"dnsproxy-scheduler/internal/config"
 	"dnsproxy-scheduler/internal/ecs"
@@ -70,10 +71,25 @@ func main() {
 		bootstrapResolver = bootstrapcache.NewHostsResolver(hosts, bootstrapResolver)
 	}
 
+	// 地址族优先级：ipv4/ipv6 交给库的 PreferIPv6 排序；latency 用周期探测器
+	// 动态选族，由 Selector 在解析层只返回优选族地址。
+	preferIPv6 := cfg.IPPriority == "ipv6"
+	var prober *afp.Prober
+	if cfg.IPPriority == "latency" {
+		targets := make([]afp.Target, 0, len(cfg.UpstreamTargets()))
+		for _, t := range cfg.UpstreamTargets() {
+			targets = append(targets, afp.Target{Host: t.Host, Port: t.Port})
+		}
+		prober = afp.NewProber(logger, bootstrapResolver, targets, cfg.IPLatencyInterval)
+		// latency 模式绕开库的静态排序，这里固定 IPv4 顺序，实际族由 Selector 决定。
+		preferIPv6 = false
+		bootstrapResolver = afp.NewSelector(bootstrapResolver, afp.IPv4, prober)
+	}
+
 	upstreamOpts := &upstream.Options{
 		Bootstrap:  bootstrapResolver,
 		Timeout:    cfg.ProbeTimeout,
-		PreferIPv6: cfg.PreferIPv6,
+		PreferIPv6: preferIPv6,
 	}
 
 	sched := scheduler.New(cfg, logger, upstreamOpts)
@@ -153,6 +169,11 @@ func main() {
 
 	// 启动调度循环（首轮立即探测）。
 	go sched.Start(ctx)
+
+	// 启动地址族延迟探测（仅 latency 模式非 nil）。
+	if prober != nil {
+		go prober.Start(ctx)
+	}
 
 	go func() {
 		if err := p.Start(ctx); err != nil {

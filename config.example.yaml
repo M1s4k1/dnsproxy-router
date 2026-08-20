@@ -68,8 +68,14 @@ hosts: {}
 #    - "1.2.3.4"
 #    - "2001:db8::1"
 
-# 域名同时有 IPv4/IPv6 时是否优先使用 IPv6（默认 false，即 IPv4 优先）。
-prefer_ipv6: false
+# 上游域名同时有 IPv4/IPv6 时的地址族优先级：
+#   ipv4    IPv4 优先（v6 作连接失败回退）
+#   ipv6    IPv6 优先（v4 作连接失败回退）
+#   latency 按延迟动态选族（周期探测两族延迟，选低延迟者）
+ip_priority: ipv4
+
+# ip_priority: latency 时的延迟探测周期
+ip_latency_interval: 15m
 
 # 上游服务商 → 查询模式 → 地址
 # 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
