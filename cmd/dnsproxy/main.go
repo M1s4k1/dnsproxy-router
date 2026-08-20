@@ -57,9 +57,23 @@ func main() {
 		bootstrapResolver = bootstrapcache.New(bootstrapResolvers, cfg.BootstrapCacheTTL)
 	}
 
+	// 域名 → IP 静态映射：命中即直接用给定 IP，未命中回退引导 DNS。
+	if len(cfg.Hosts) > 0 {
+		hosts := make(map[string][]netip.Addr, len(cfg.Hosts))
+		for name, addrs := range cfg.Hosts {
+			ips := make([]netip.Addr, 0, len(addrs))
+			for _, a := range addrs {
+				ips = append(ips, netip.MustParseAddr(a))
+			}
+			hosts[name] = ips
+		}
+		bootstrapResolver = bootstrapcache.NewHostsResolver(hosts, bootstrapResolver)
+	}
+
 	upstreamOpts := &upstream.Options{
-		Bootstrap: bootstrapResolver,
-		Timeout:   cfg.ProbeTimeout,
+		Bootstrap:  bootstrapResolver,
+		Timeout:    cfg.ProbeTimeout,
+		PreferIPv6: cfg.PreferIPv6,
 	}
 
 	sched := scheduler.New(cfg, logger, upstreamOpts)

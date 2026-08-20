@@ -175,3 +175,60 @@ dns:
 		t.Fatalf("非法逐出策略应报错")
 	}
 }
+
+func TestLoadConfigHosts(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+hosts:
+  dns.example.com:
+    - "1.2.3.4"
+    - "2001:db8::1"
+prefer_ipv6: true
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if len(c.Hosts["dns.example.com"]) != 2 {
+		t.Fatalf("Hosts 解析错误: %+v", c.Hosts)
+	}
+	if !c.PreferIPv6 {
+		t.Fatalf("PreferIPv6 应已开启")
+	}
+}
+
+func TestLoadConfigBadHostsIP(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+hosts:
+  dns.example.com:
+    - "not-an-ip"
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法 hosts IP 应报错")
+	}
+}

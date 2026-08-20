@@ -131,6 +131,8 @@ dig @你的域名 example.com A
 | `cache_eviction` | 逐出策略：`fifo` \| `lru` \| `lfu` | `lru` |
 | `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53` |
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（0 关闭） | `5s` |
+| `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
+| `prefer_ipv6` | 域名同时有 IPv4/IPv6 时是否优先用 IPv6 | `false` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
 
 ### `cert.provider`：DNS API 提供商（DNS-01）
@@ -198,6 +200,24 @@ cache_eviction: lru
 
 - 命中缓存时，返回的响应各记录 TTL 会按剩余寿命递减；过期条目自动失效并重新向上游查询。
 - ECS 纳入缓存键，`pass` 模式下不同子网不会互相串缓存。
+
+### `hosts` 字段：上游域名 → IP 静态映射
+
+引导 DNS 用于解析上游主机名（DoH/DoT/DoQ 的 hostname）。若某上游域名希望**固定解析到指定 IP**、跳过引导 DNS 查询，用 `hosts` 映射：
+
+```yaml
+hosts:
+  dns.example.com:
+    - "1.2.3.4"
+    - "2001:db8::1"     # 可同时配 IPv4 与 IPv6
+  dns.example.net:
+    - "5.6.7.8"
+prefer_ipv6: false
+```
+
+- 键为上游主机名（可带或不带尾部点），值为 IP 列表（IPv4/IPv6 均可）。
+- 命中即直接使用给定 IP，不再查询引导 DNS；未命中的域名照常走引导 DNS。
+- 同一域名同时配 IPv4/IPv6 时，优先级由 `prefer_ipv6` 决定：`false`（默认）IPv4 优先、`true` IPv6 优先。首选地址族**连接失败时自动回退**另一族。
 
 ### `dns` 字段：服务商 → 模式 → 地址
 

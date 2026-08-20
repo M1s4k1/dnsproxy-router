@@ -437,6 +437,44 @@ for ip in "${BOOTSTRAP_ARR[@]}"; do
   BOOTSTRAP_LIST+="  - \"${ip}\""$'\n'
 done
 
+# 域名 → IP 静态映射：命中即直接用给定 IP，不再走引导 DNS。
+say ""
+say "  上游域名 → IP 静态映射（可选）：对指定域名固定其解析 IP，跳过引导 DNS。"
+say "  例如上游主机名 dns.example.com 固定解析到 1.2.3.4。留空跳过。"
+HOSTS_BLOCK=""
+HOSTS_COUNT=0
+while :; do
+  say ""
+  read -rp "  上游域名（留空结束）: " hname
+  [ -z "$hname" ] && break
+  hname="$(printf '%s' "$hname" | xargs)"
+  read -rp "    该域名的 IP（IPv4/IPv6，逗号分隔多个）: " haddrs
+  haddrs="$(printf '%s' "$haddrs" | xargs)"
+  [ -z "$haddrs" ] && continue
+  HOSTS_BLOCK+="  \"${hname}\":"$'\n'
+  IFS=',' read -ra HADDR_ARR <<< "$haddrs"
+  for ha in "${HADDR_ARR[@]}"; do
+    ha="$(printf '%s' "$ha" | xargs)"
+    [ -z "$ha" ] && continue
+    HOSTS_BLOCK+="    - \"${ha}\""$'\n'
+  done
+  HOSTS_COUNT=$((HOSTS_COUNT + 1))
+done
+
+# 组装 hosts 段：空映射输出 hosts: {}，否则输出 hosts: + 映射行。
+if [ "$HOSTS_COUNT" -gt 0 ]; then
+  HOSTS_YAML="hosts:"$'\n'"${HOSTS_BLOCK}"
+else
+  HOSTS_YAML="hosts: {}"$'\n'
+fi
+
+PREFER_IPV6="false"
+if [ "$HOSTS_COUNT" -gt 0 ]; then
+  if ask_yn "  域名同时有 IPv4/IPv6 时，是否优先使用 IPv6（默认 IPv4 优先）" "n"; then
+    PREFER_IPV6="true"
+  fi
+fi
+
 # --- 5. 上游 DNS（循环添加）---
 say ""
 info "【5/6】上游 DNS 服务商配置"
@@ -520,6 +558,8 @@ cache_eviction: ${CACHE_EVICTION}
 bootstrap:
 ${BOOTSTRAP_LIST}
 bootstrap_cache_ttl: ${BOOTSTRAP_CACHE_TTL}
+
+${HOSTS_YAML}prefer_ipv6: ${PREFER_IPV6}
 
 dns:
 ${DNS_BLOCK}

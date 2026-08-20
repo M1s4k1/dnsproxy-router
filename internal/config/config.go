@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"time"
@@ -90,6 +91,11 @@ type Config struct {
 	Bootstrap []string `yaml:"bootstrap"`
 	// BootstrapCacheTTL: 引导解析结果的缓存时长（0 表示不缓存）。
 	BootstrapCacheTTL time.Duration `yaml:"bootstrap_cache_ttl"`
+	// Hosts: 上游域名 → IP 静态映射，命中即直接用给定 IP，不再走引导 DNS。
+	// 键为域名（可带点），值为 IP 列表（IPv4/IPv6 均可）。
+	Hosts map[string][]string `yaml:"hosts"`
+	// PreferIPv6: 域名同时有 IPv4/IPv6 时，是否优先使用 IPv6（连接失败自动回退另一族）。
+	PreferIPv6 bool `yaml:"prefer_ipv6"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
 	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
@@ -146,6 +152,10 @@ func DefaultConfig() Config {
 		CacheTTL:       30 * time.Minute,
 		CacheEviction:  "lru",
 		Bootstrap:      []string{"1.1.1.1:53", "8.8.8.8:53"},
+		// Hosts 默认留空：域名→IP 静态映射属用户私密配置，请通过 config.yaml
+		// 或 interactive-setup.sh 自行填写。
+		Hosts: map[string][]string{},
+		// PreferIPv6 默认 false（IPv4 优先）。
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
 		// interactive-setup.sh 自行填写（空值会被 LoadConfig 校验拒绝）。
@@ -269,6 +279,9 @@ func (c *Config) normalize() error {
 	if len(c.Bootstrap) == 0 {
 		c.Bootstrap = []string{"1.1.1.1:53", "8.8.8.8:53"}
 	}
+	if err := c.validateHosts(); err != nil {
+		return err
+	}
 	if len(c.DNS) == 0 {
 		return fmt.Errorf("dns 不能为空")
 	}
@@ -278,6 +291,24 @@ func (c *Config) normalize() error {
 		}
 		if len(modes) == 0 {
 			return fmt.Errorf("服务商 %s 的查询模式不能为空", name)
+		}
+	}
+	return nil
+}
+
+// validateHosts 校验 hosts 映射：域名非空、每个 IP 均可解析，且至少一个 IP。
+func (c *Config) validateHosts() error {
+	for name, addrs := range c.Hosts {
+		if name == "" {
+			return fmt.Errorf("hosts 键（域名）不能为空")
+		}
+		if len(addrs) == 0 {
+			return fmt.Errorf("hosts 域名 %q 的 IP 列表不能为空", name)
+		}
+		for _, a := range addrs {
+			if _, err := netip.ParseAddr(a); err != nil {
+				return fmt.Errorf("hosts 域名 %q 的 IP 非法 %q: %w", name, a, err)
+			}
 		}
 	}
 	return nil
