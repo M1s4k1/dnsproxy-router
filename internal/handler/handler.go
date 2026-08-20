@@ -12,10 +12,8 @@ import (
 	"dnsproxy-scheduler/internal/scheduler"
 )
 
-// Handler 实现 proxy.Handler。
-//
-// 它把 scheduler 当前周期的选路（内含各家最优线路 + 缓存）注入到每个请求，
-// 再交还 p.Resolve。这样既保留库的缓存、去重、SERVFAIL 兜底，
+// Handler 把 scheduler 当前周期的选路（各家最优线路 + 缓存）注入每个请求，
+// 再交还 p.Resolve：既保留库的缓存、去重、SERVFAIL 兜底，
 // 又实现「多家并发赛马」（依赖 proxy.UpstreamModeParallel）。
 type Handler struct {
 	sched          *scheduler.Scheduler
@@ -24,7 +22,6 @@ type Handler struct {
 	fallbackLogged atomic.Bool
 }
 
-// New 构造一个 Handler。
 func New(sched *scheduler.Scheduler, logger *slog.Logger, ecs *ecs.Policy) *Handler {
 	return &Handler{sched: sched, logger: logger, ecs: ecs}
 }
@@ -35,7 +32,6 @@ func (h *Handler) logOnce(msg string) {
 	}
 }
 
-// ServeDNS 实现 proxy.Handler 接口。
 func (h *Handler) ServeDNS(ctx context.Context, p *proxy.Proxy, dctx *proxy.DNSContext) error {
 	cfg := h.sched.CurrentConfig()
 	if cfg == nil {

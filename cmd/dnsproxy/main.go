@@ -1,5 +1,4 @@
-// dnsproxy-scheduler 入口：一个对外只提供 DoH 的 DNS 代理，
-// 内部对多家上游服务商做「动态择优 + 并发赛马」。
+// dnsproxy-scheduler 入口：对外只提供 DoH 的 DNS 代理，内部对多家上游做「动态择优 + 并发赛马」。
 package main
 
 import (
@@ -60,14 +59,12 @@ func main() {
 		Timeout:   cfg.ProbeTimeout,
 	}
 
-	// 服务端 TLS 证书。
 	cert, err := tls.LoadX509KeyPair(cfg.Cert.CertPath, cfg.Cert.KeyPath)
 	if err != nil {
 		logger.Error("加载 TLS 证书失败", "err", err)
 		os.Exit(1)
 	}
 
-	// 监听地址。
 	ap, err := netip.ParseAddrPort(cfg.ListenAddr())
 	if err != nil {
 		logger.Error("解析监听地址失败", "addr", cfg.ListenAddr(), "err", err)
@@ -85,8 +82,7 @@ func main() {
 	// 仅 pass 模式开启库的 ECS 透传与 subnet 缓存分键。
 	enableECS := cfg.ECS.Mode == "pass"
 
-	// 全局占位上游：validateConfig 要求非空，但实际转发走 Handler 注入的
-	// CustomUpstreamConfig。仅在选路未就绪时的极短暂回退会被用到。
+	// 占位上游：实际转发走 Handler 注入的 CustomUpstreamConfig，此配置仅在选路未就绪时回退。
 	placeholder, err := proxy.ParseUpstreamsConfig([]string{"tls://1.1.1.1:853"}, upstreamOpts)
 	if err != nil {
 		logger.Error("解析占位上游失败", "err", err)
@@ -120,7 +116,6 @@ func main() {
 	// 启动调度循环（首轮立即探测）。
 	go sched.Start(ctx)
 
-	// 启动 DoH 服务。
 	go func() {
 		if err := p.Start(ctx); err != nil {
 			logger.Error("proxy 启动失败", "err", err)

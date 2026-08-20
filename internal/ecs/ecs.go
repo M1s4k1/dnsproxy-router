@@ -10,16 +10,13 @@ import (
 )
 
 // Policy 描述 ECS 处理策略。三种模式：
-//   - off      关闭：移除发往上游请求中的整个 OPT（EDNS）记录，不传任何 EDNS 信息。
-//   - pass     透传：保留客户端请求的 ECS 原样（依赖库的 EnableEDNSClientSubnet
-//     实现透传 + 按 ECS 分键的 subnet 缓存）。
+//   - off      关闭：移除发往上游请求中的整个 OPT（EDNS）记录。
+//   - pass     透传：保留客户端请求的 ECS 原样（依赖库的 EnableEDNSClientSubnet）。
 //   - override 覆写：移除客户端 ECS，强制写入配置的固定 ECS。
 //
-// 缓存正确性：
-//   - off/override 模式下 ECS 是确定性的（无 / 固定），库的普通缓存 key
-//     （不含 ECS）对所有客户端一致，不会串缓存。
-//   - pass 模式下 ECS 随客户端变化，必须开启库的 EnableEDNSClientSubnet
-//     才能走 subnet 缓存；该开关在 cmd/dnsproxy/main.go 按 mode 注入。
+// 缓存正确性：off/override 模式下 ECS 是确定性的，普通缓存 key 对所有客户端一致；
+// pass 模式下 ECS 随客户端变化，必须开启库的 EnableEDNSClientSubnet 走 subnet 缓存
+// （该开关在 cmd/dnsproxy/main.go 按 mode 注入）。
 type Policy struct {
 	mode   string       // "off" / "pass" / "override"
 	prefix netip.Prefix // override 模式的固定前缀（已规范化）
@@ -75,7 +72,6 @@ func setECSOverride(m *dns.Msg, prefix netip.Prefix) {
 		m.Extra = append(m.Extra, opt)
 	}
 
-	// 移除现有 ECS 选项。
 	opts := opt.Option[:0]
 	for _, o := range opt.Option {
 		if _, ok := o.(*dns.EDNS0_SUBNET); ok {

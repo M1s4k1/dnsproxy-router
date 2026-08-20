@@ -7,7 +7,8 @@ set -euo pipefail
 #
 # 用法（root 下执行）:
 #   bash interactive-setup.sh [二进制路径]
-#   默认二进制路径: ./dnsproxy-scheduler
+#   默认二进制路径: 脚本同目录下的 dnsproxy-scheduler
+#   建议把二进制和脚本一起上传到 /root/ 再运行，无需传位置参数。
 # ============================================================================
 
 BIN_SRC="${1:-$(dirname "$0")/dnsproxy-scheduler}"
@@ -37,12 +38,109 @@ ask() {
   printf '%s' "${input:-$default}"
 }
 
-# ask_yn <提示> [默认 y/n]
+# ask_yn <提示> [默认 y/n] -> 返回 0(yes)/1(no)，非法输入重问
+# 提示固定显示 [y/n]，输入 y/Y 或 n/N（含 yes/no）均可识别。
 ask_yn() {
   local prompt="$1" default="${2:-n}" input
-  read -rp "$(printf '%s [%s]: ' "$prompt" "$default")" input
-  input="${input:-$default}"
-  [[ "$input" =~ ^[Yy] ]]
+  while :; do
+    read -rp "$(printf '%s [y/n]: ' "$prompt")" input
+    input="${input:-$default}"
+    case "$input" in
+      [yY]|[yY][eE][sS]) return 0 ;;
+      [nN]|[nN][oO])     return 1 ;;
+      *) warn_err "  请输入 y 或 n" ;;
+    esac
+  done
+}
+
+# warn_err：同 warn，但输出到 stderr（用于命令替换函数内部的报错，避免污染返回值）
+warn_err() { printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
+
+# ask_int <提示> <默认值> [最小值] [最大值] -> 校验整数，非法重问，stdout 输出合法值
+ask_int() {
+  local prompt="$1" default="$2" min="${3:-0}" max="${4:-0}" input
+  while :; do
+    read -rp "$(printf '%s [%s]: ' "$prompt" "$default")" input
+    input="${input:-$default}"
+    if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge "$min" ] && { [ "$max" -le 0 ] || [ "$input" -le "$max" ]; }; then
+      printf '%s' "$input"
+      return 0
+    fi
+    if [ "$max" -gt 0 ]; then
+      warn_err "  非法输入「${input}」：需为 ${min}~${max} 的整数"
+    else
+      warn_err "  非法输入「${input}」：需为 ≥${min} 的整数"
+    fi
+  done
+}
+
+# ask_duration <提示> <默认值> -> 校验 Go time.Duration（数字+单位），非法重问
+ask_duration() {
+  local prompt="$1" default="$2" input
+  while :; do
+    read -rp "$(printf '%s [%s]: ' "$prompt" "$default")" input
+    input="${input:-$default}"
+    if [[ "$input" =~ ^[0-9]+(ns|us|ms|s|m|h)$ ]]; then
+      printf '%s' "$input"
+      return 0
+    fi
+    warn_err "  非法时长「${input}」：需为 数字+单位（ns/us/ms/s/m/h），如 15m、3s、1h"
+  done
+}
+
+# normalize_upstream_addr <模式> <地址> -> stdout 输出规范化后的上游地址
+# 规则：无 scheme 按模式补（DoH→https:// DoT→tls:// DoQ→quic://）；
+#       无端口按 scheme 补默认（DoH=443 DoT=853 DoQ=853）；
+#       DoH 无路径补 /dns-query。已有前缀/端口/路径则原样保留。
+normalize_upstream_addr() {
+  local mode="$1" addr="$2"
+  local scheme="" default_port=""
+  case "$mode" in
+    DNS-over-HTTPS) scheme="https"; default_port=443 ;;
+    DNS-over-TLS)   scheme="tls";   default_port=853 ;;
+    DNS-over-QUIC)  scheme="quic";  default_port=853 ;;
+  esac
+
+  local rest="$addr" host="" path=""
+  if [[ "$addr" == *"://"* ]]; then
+    scheme="${addr%%://*}"
+    rest="${addr#*://}"
+    case "$scheme" in
+      https|h3)      default_port=443 ;;
+      tls|quic)      default_port=853 ;;
+      udp|tcp)       default_port=53 ;;
+      *)             default_port="" ;;
+    esac
+  fi
+
+  # 分离 host 与 path（第一个 / 之后为 path）
+  if [[ "$rest" == *"/"* ]]; then
+    host="${rest%%/*}"
+    path="/${rest#*/}"
+  else
+    host="$rest"
+    path=""
+  fi
+
+  # host 是否已含端口
+  local has_port=false
+  case "$host" in
+    *"]:"*) has_port=true ;;   # [::1]:853
+    \[*)     ;;                # [::1]（IPv6 无端口）
+    *:*)     has_port=true ;;  # host:853
+  esac
+
+  # 补端口
+  if [ "$has_port" = false ] && [ -n "$default_port" ]; then
+    host="${host}:${default_port}"
+  fi
+
+  # DoH 无路径补 /dns-query
+  if [ "$scheme" = "https" ] && [ -z "$path" ]; then
+    path="/dns-query"
+  fi
+
+  printf '%s' "${scheme}://${host}${path}"
 }
 
 # --- 0. 前置检查 ---
@@ -71,12 +169,7 @@ fi
 if ask_yn "使用标准端口 443（DoH 默认，推荐）" "y"; then
   PORT=443
 else
-  PORT="$(ask "自定义对外 DoH 监听端口" "")"
-  # 简单校验端口
-  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-    warn "非法端口，使用默认 443"
-    PORT=443
-  fi
+  PORT="$(ask_int "自定义对外 DoH 监听端口" "443" 1 65535)"
 fi
 
 DOH_PATH="$(ask "DoH 端点路径（可自定义，支持多层，如 /dns/query/v1）" "/dns-query")"
@@ -156,9 +249,9 @@ fi
 # --- 3. 探测参数 ---
 say ""
 info "【3/6】探测参数（每周期对各家各模式测延迟，选每家最优）"
-PROBE_INTERVAL="$(ask "探测周期（如 15m/300s）" "15m")"
-PROBE_TIMEOUT="$(ask "单次探测超时（如 3s）" "3s")"
-PROBE_COUNT="$(ask "每模式探测次数（取中位数）" "3")"
+PROBE_INTERVAL="$(ask_duration "探测周期（如 15m/300s）" "15m")"
+PROBE_TIMEOUT="$(ask_duration "单次探测超时（如 3s）" "3s")"
+PROBE_COUNT="$(ask_int "每模式探测次数（取中位数）" "3" 1)"
 PROBE_DOMAIN="$(ask "探测用域名" "example.com.")"
 
 # --- 4. 缓存与引导 ---
@@ -168,7 +261,7 @@ info "【4/6】缓存与引导 DNS"
 # 响应缓存：先问是否开启，开启才问大小。
 if ask_yn "开启 DNS 响应缓存（若客户端已做本地缓存，可关闭）" "y"; then
   CACHE_ENABLED="true"
-  CACHE_SIZE="$(ask "响应缓存大小（字节）" "67108864")"
+  CACHE_SIZE="$(ask_int "响应缓存大小（字节）" "67108864" 1)"
 else
   CACHE_ENABLED="false"
   CACHE_SIZE="0"
@@ -178,7 +271,7 @@ BOOTSTRAP_INPUT="$(ask "引导 DNS（逗号分隔，用于解析上游域名）"
 
 # 引导解析缓存：先问是否开启，开启才问缓存时长。
 if ask_yn "开启引导解析缓存（缓存上游域名解析结果）" "y"; then
-  BOOTSTRAP_CACHE_TTL="$(ask "引导解析缓存时长（如 5s/1m）" "5s")"
+  BOOTSTRAP_CACHE_TTL="$(ask_duration "引导解析缓存时长（如 5s/1m）" "5s")"
 else
   BOOTSTRAP_CACHE_TTL="0s"
 fi
@@ -213,8 +306,10 @@ while :; do
       3) mode="DNS-over-QUIC" ;;
       *) break ;;
     esac
-    read -rp "    ${mode} 地址: " maddr
+    read -rp "    ${mode} 地址（可不带前缀/端口，如 dns.example.com）: " maddr
     [ -z "$maddr" ] && continue
+    maddr="$(normalize_upstream_addr "$mode" "$maddr")"
+    say "      已规范化为: ${maddr}"
     DNS_BLOCK+="    ${mode}: \"${maddr}\""$'\n'
   done
 done
@@ -266,10 +361,10 @@ ok "已生成配置文件: ${CONF_FILE}"
 # --- 7. 安装二进制 ---
 if [ ! -f "$BIN_SRC" ]; then
   warn "找不到二进制 $BIN_SRC"
-  say "  请先构建并上传："
+  say "  请先构建并上传到本机（例如 /root/）："
   say "    GOOS=linux GOARCH=amd64 go build -o dnsproxy-scheduler ./cmd/dnsproxy"
-  say "    scp dnsproxy-scheduler root@VPS:/tmp/"
-  say "  然后重新运行: bash $0 /tmp/dnsproxy-scheduler"
+  say "    scp dnsproxy-scheduler root@VPS:/root/"
+  say "  然后重新运行: bash $0 /root/dnsproxy-scheduler"
   exit 1
 fi
 install -m 0755 "$BIN_SRC" "${INSTALL_DIR}/${SERVICE}"
