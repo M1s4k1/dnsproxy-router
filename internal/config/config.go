@@ -103,6 +103,15 @@ type Config struct {
 	IPPriority string `yaml:"ip_priority"`
 	// IPLatencyInterval: ip_priority=latency 时，重新探测各地址族延迟的周期。
 	IPLatencyInterval time.Duration `yaml:"ip_latency_interval"`
+	// UpstreamMode: 上游查询结果的赛马模式：
+	// "fastest"（并发查询，谁先成功返回用谁）/ "weighted"（加权 + 延时窗口）。
+	UpstreamMode string `yaml:"upstream_mode"`
+	// UpstreamWeights: weighted 模式下各服务商的权重（1-100）。键为 dns 的服务商名。
+	// 未列出的服务商默认权重 1（最低）。
+	UpstreamWeights map[string]int `yaml:"upstream_weights"`
+	// RaceWindow: weighted 模式的延时窗口（如 50ms）。第一个成功响应后，
+	// 窗口期内到达的成功响应均纳入候选，超时抛弃。
+	RaceWindow time.Duration `yaml:"race_window"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
 	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
@@ -165,6 +174,10 @@ func DefaultConfig() Config {
 		// IPPriority 默认 ipv4（IPv4 优先）。
 		IPPriority:        "ipv4",
 		IPLatencyInterval: 15 * time.Minute,
+		// UpstreamMode 默认 fastest（并发赛马，谁先成功返回用谁）。
+		UpstreamMode:    "fastest",
+		UpstreamWeights: map[string]int{},
+		RaceWindow:      50 * time.Millisecond,
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
 		// interactive-setup.sh 自行填写（空值会被 LoadConfig 校验拒绝）。
@@ -302,6 +315,25 @@ func (c *Config) normalize() error {
 	if c.IPLatencyInterval <= 0 {
 		c.IPLatencyInterval = 15 * time.Minute
 	}
+	if c.UpstreamMode == "" {
+		c.UpstreamMode = "fastest"
+	}
+	switch c.UpstreamMode {
+	case "fastest", "weighted":
+	default:
+		return fmt.Errorf("upstream_mode 必须为 fastest/weighted，当前为 %q", c.UpstreamMode)
+	}
+	if c.RaceWindow <= 0 {
+		c.RaceWindow = 50 * time.Millisecond
+	}
+	for name, w := range c.UpstreamWeights {
+		if name == "" {
+			return fmt.Errorf("upstream_weights 键（服务商名）不能为空")
+		}
+		if w < 1 || w > 100 {
+			return fmt.Errorf("服务商 %s 的权重非法 %d：需为 1~100", name, w)
+		}
+	}
 	if len(c.DNS) == 0 {
 		return fmt.Errorf("dns 不能为空")
 	}
@@ -314,6 +346,14 @@ func (c *Config) normalize() error {
 		}
 	}
 	return nil
+}
+
+// Weight 返回服务商的权重（1-100）；未配置时返回默认 1。
+func (c *Config) Weight(name string) int {
+	if w, ok := c.UpstreamWeights[name]; ok && w >= 1 {
+		return w
+	}
+	return 1
 }
 
 // validateHosts 校验 hosts 映射：域名非空、每个 IP 均可解析，且至少一个 IP。

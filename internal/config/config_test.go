@@ -280,6 +280,121 @@ dns:
 	}
 }
 
+func TestLoadConfigUpstreamModeDefault(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.UpstreamMode != "fastest" {
+		t.Fatalf("UpstreamMode 默认应为 fastest，得到 %q", c.UpstreamMode)
+	}
+	if c.RaceWindow.String() != "50ms" {
+		t.Fatalf("RaceWindow 默认应为 50ms，得到 %q", c.RaceWindow)
+	}
+	if c.Weight("cf") != 1 {
+		t.Fatalf("未配置权重应默认 1，得到 %d", c.Weight("cf"))
+	}
+}
+
+func TestLoadConfigWeighted(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+upstream_mode: weighted
+race_window: 80ms
+upstream_weights:
+  cf: 8
+  adguard: 20
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+  adguard:
+    DNS-over-TLS: "tls://dns.adguard.com:853"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.UpstreamMode != "weighted" {
+		t.Fatalf("UpstreamMode 解析错误: %q", c.UpstreamMode)
+	}
+	if c.RaceWindow.String() != "80ms" {
+		t.Fatalf("RaceWindow 解析错误: %q", c.RaceWindow)
+	}
+	if c.Weight("cf") != 8 || c.Weight("adguard") != 20 {
+		t.Fatalf("权重解析错误: cf=%d adguard=%d", c.Weight("cf"), c.Weight("adguard"))
+	}
+}
+
+func TestLoadConfigBadUpstreamMode(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+upstream_mode: foo
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法 upstream_mode 应报错")
+	}
+}
+
+func TestLoadConfigBadWeight(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+upstream_mode: weighted
+upstream_weights:
+  cf: 150
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法权重（>100）应报错")
+	}
+}
+
 func TestUpstreamTargets(t *testing.T) {
 	c := Config{
 		DNS: map[string]map[string]string{

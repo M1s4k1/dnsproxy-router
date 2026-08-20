@@ -482,10 +482,12 @@ say "  项目不内置任何上游端点，请在此添加你自己的 DNS 服�
 say "  每个服务商可配置多种查询模式：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS"
 
 DNS_BLOCK=""
+PROVIDERS=()
 while :; do
   say ""
   read -rp "服务商名（留空结束）: " pname
   [ -z "$pname" ] && break
+  PROVIDERS+=("$pname")
   DNS_BLOCK+="  ${pname}:"$'\n'
   while :; do
     say "    为 ${pname} 添加模式："
@@ -507,6 +509,32 @@ while :; do
 done
 
 [ -z "$DNS_BLOCK" ] && { warn "未配置任何上游，退出。"; exit 1; }
+
+# 上游查询结果的赛马模式：最快返回 vs 加权 + 延时窗口。
+say ""
+info "上游查询结果赛马模式"
+say "  1) 最快返回：并发查各家最优线路，谁先成功返回用谁"
+say "  2) 加权 + 延时窗口：给每家设权重(1-100)，在首个响应后的窗口期内收集所有"
+say "     响应，取权重最高者；权重相同时取响应最快者"
+UPSTREAM_MODE="fastest"
+WEIGHTS_YAML=""
+RACE_WINDOW="50ms"
+case "$(ask "选择赛马模式（1/2）" "1")" in
+  2)
+    UPSTREAM_MODE="weighted"
+    RACE_WINDOW="$(ask_duration "延时窗口（首个响应后等待多久，如 50ms/80ms）" "50ms")"
+    say ""
+    say "  为每家服务商设置权重（1-100，默认 1，数字越大越优先）："
+    WEIGHTS_YAML="upstream_weights:"$'\n'
+    for pn in "${PROVIDERS[@]}"; do
+      w="$(ask_int "    ${pn} 权重" "1" 1 100)"
+      WEIGHTS_YAML+="  ${pn}: ${w}"$'\n'
+    done
+    ;;
+  *)
+    UPSTREAM_MODE="fastest"
+    ;;
+esac
 
 # 地址族优先级：当上游域名存在 IPv4/IPv6 双栈时，让用户选择优先级。
 # 触发条件有二：① hosts 映射中任一个域名同时配了 v4+v6；② 用引导 DNS 解析时
@@ -593,6 +621,9 @@ bootstrap_cache_ttl: ${BOOTSTRAP_CACHE_TTL}
 
 ${HOSTS_YAML}ip_priority: ${IP_PRIORITY}
 ip_latency_interval: ${IP_LATENCY_INTERVAL}
+
+upstream_mode: ${UPSTREAM_MODE}
+${WEIGHTS_YAML}race_window: ${RACE_WINDOW}
 
 dns:
 ${DNS_BLOCK}

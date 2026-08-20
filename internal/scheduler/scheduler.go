@@ -158,9 +158,15 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 
 	selAddr := make(map[string]string, len(selected))
 	selUp := make(map[string]upstream.Upstream, len(selected))
+	members := make([]racingMember, 0, len(selected))
 	for name, b := range selected {
 		selAddr[name] = b.addr
 		selUp[b.addr] = b.upstream
+		members = append(members, racingMember{
+			name:     name,
+			weight:   s.cfg.Weight(name),
+			upstream: b.upstream,
+		})
 	}
 	newSig := selectSignature(selAddr)
 
@@ -170,25 +176,29 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 	}
 
 	var newCfg *proxy.CustomUpstreamConfig
-	if len(selUp) > 0 {
-		// 所有上游共享同一个缓存实例：同一查询不因由哪家解析而异，且省内存。
-		// 缓存跟随选路生命周期，选路变化时随 newCfg 一并重建。
-		var shared *cache.Cache
+	if len(members) > 0 {
+		// 把「多家当前最优线路」收拢为一个聚合上游，交给库的单元素 exchange
+		// 路径（UpstreamModeParallel 对单元素直接调 Exchange），由聚合上游内部
+		// 并发查询并实现 fastest（谁先成功用谁）或 weighted（加权 + 延时窗口）。
+		weighted := s.cfg.UpstreamMode == "weighted"
+		racing := newRacing(members, weighted, s.cfg.RaceWindow)
+
+		// 缓存包在聚合层外层：一个请求先查缓存，未命中才并发查所有子并回填，
+		// 避免各上游重复查询。共享同一实例，跟随选路生命周期，选路变化时重建。
+		var finalUp upstream.Upstream = racing
 		if *s.cfg.CacheEnabled {
-			shared = cache.New(cache.Config{
+			shared := cache.New(cache.Config{
 				MaxBytes: int64(s.cfg.CacheSizeBytes),
 				TTL:      s.cfg.CacheTTL,
 				Eviction: cache.Policy(s.cfg.CacheEviction),
 			})
+			finalUp = s.wrapCached(racing, shared)
 		}
-		ups := make([]upstream.Upstream, 0, len(selUp))
-		for _, u := range selUp {
-			ups = append(ups, s.wrapCached(u, shared))
-		}
+
 		// 缓存由 wrapping 的 cachingUpstream 承担（支持固定 TTL 与
 		// FIFO/LRU/LFU 逐出），故此处关闭库自带的 per-route 缓存。
 		newCfg = proxy.NewCustomUpstreamConfig(
-			&proxy.UpstreamConfig{Upstreams: ups},
+			&proxy.UpstreamConfig{Upstreams: []upstream.Upstream{finalUp}},
 			false,
 			0,
 			false,
@@ -328,42 +338,12 @@ func pickBest(results []probeResult) *probeResult {
 // wrapCached 用共享缓存包装上游。shared 为 nil 表示缓存已关闭，直接返回原上游。
 // 返回的 upstream.Upstream 会先查缓存，命中则直接返回、未命中才真正转发并回填。
 //
-// 之所以在「上游层」而非 handler 层做缓存：库的并行赛马（UpstreamModeParallel）
-// 会逐一对每个上游调用 Exchange，缓存包装恰好在每次转发前拦截，天然复用了
-// 库的去重、SERVFAIL 兜底与响应管线，无需在 handler 里重写整个解析流程。
+// 之所以在「上游层」而非 handler 层做缓存：库对 custom upstream 的每个 upstream
+// 都会调用 Exchange，缓存包装恰好在每次转发前拦截，天然复用了库的去重、SERVFAIL
+// 兜底与响应管线，无需在 handler 里重写整个解析流程。
 func (s *Scheduler) wrapCached(u upstream.Upstream, shared *cache.Cache) upstream.Upstream {
 	if shared == nil {
 		return u
 	}
 	return &cachingUpstream{upstream: u, cache: shared}
 }
-
-// cachingUpstream 用共享缓存包装单个上游，实现 upstream.Upstream 接口。
-// 所有上游共享同一个 cache 实例，保证同一查询跨上游命中。
-type cachingUpstream struct {
-	upstream upstream.Upstream
-	cache    *cache.Cache
-}
-
-// Exchange 先查缓存，命中则返回副本；否则转发并把可缓存响应回填缓存。
-func (c *cachingUpstream) Exchange(req *dns.Msg) (*dns.Msg, error) {
-	if resp := c.cache.Get(req); resp != nil {
-		return resp, nil
-	}
-	resp, err := c.upstream.Exchange(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp != nil {
-		c.cache.Set(req, resp)
-	}
-	return resp, nil
-}
-
-// Address 透传底层上游地址。
-func (c *cachingUpstream) Address() string { return c.upstream.Address() }
-
-// Close 透传底层上游关闭。
-func (c *cachingUpstream) Close() error { return c.upstream.Close() }
-
-var _ upstream.Upstream = (*cachingUpstream)(nil)
