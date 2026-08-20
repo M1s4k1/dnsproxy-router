@@ -5,18 +5,31 @@ set -euo pipefail
 # dnsproxy-scheduler 交互式配置 + 部署脚本
 # 通过交互引导用户填写配置，生成 config.yaml，申请证书，部署并启动服务。
 #
-# 用法（root 下执行）:
-#   bash interactive-setup.sh [二进制路径]
-#   默认二进制路径: 脚本同目录下的 dnsproxy-scheduler
-#   建议把二进制和脚本一起上传到 /root/ 再运行，无需传位置参数。
+# 用法（root 下执行，Linux + systemd）:
+#   bash interactive-setup.sh               # 自动获取二进制（下载 release / 编译）
+#   bash interactive-setup.sh /path/to/bin  # 使用本地二进制（跳过下载/编译）
+#
+# 自动获取二进制的优先级：
+#   1) 有匹配架构的 GitHub Release 则直接下载
+#   2) 无 release 则本地编译（自动 git clone / 下载源码 tarball）
+#   3) 未安装 Go 则先安装官方 Go 工具链再编译
 # ============================================================================
 
-BIN_SRC="${1:-$(dirname "$0")/dnsproxy-scheduler}"
+# 二进制来源：显式传本地路径则直接用；否则自动获取（下载 release / 编译）。
+BIN_ARG="${1:-}"
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/etc/dnsproxy"
 CONF_FILE="${CONF_DIR}/config.yaml"
 CERT_DIR="${CONF_DIR}/certs"
 SERVICE="dnsproxy-scheduler"
+BIN_NAME="dnsproxy-scheduler"
+
+# 下载 release 用的 GitHub 仓库（fork 本项目后改成你自己的）。
+REPO="M1s4k1/dnsproxy"
+# 下载的 release 版本：latest 表示最新 release；也可指定如 v1.0.0。
+VERSION="${VERSION:-latest}"
+# 未安装 Go 时安装的版本（应与 go.mod 的 go 指令一致）。
+GO_VERSION="1.26.6"
 
 # 颜色（仅在交互终端启用）
 if [ -t 1 ]; then
@@ -217,11 +230,140 @@ collect_credentials() {
   done
 }
 
-# --- 0. 前置检查 ---
+# --- 0. 前置检查：root + 系统类型 + CPU 架构 ---
 if [ "$(id -u)" -ne 0 ]; then
   warn "请用 root 执行（或 sudo）。"
   exit 1
 fi
+
+# 系统类型：本脚本面向 Linux + systemd 部署。
+if [ "$(uname -s)" != "Linux" ]; then
+  warn "本脚本仅支持 Linux（依赖 systemd 部署服务）。当前系统: $(uname -s)"
+  exit 1
+fi
+if ! command -v systemctl >/dev/null 2>&1; then
+  warn "未检测到 systemctl，无法部署 systemd 服务。请在本机 systemd 环境运行。"
+  exit 1
+fi
+
+# detect_arch -> 输出产物标签（linux-amd64 / linux-arm64 / linux-armv7）。
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)       printf 'linux-amd64' ;;
+    aarch64|arm64)      printf 'linux-arm64' ;;
+    armv7l|armv7|armhf) printf 'linux-armv7' ;;
+    *)                  printf '' ;;
+  esac
+}
+ARCH_TAG="$(detect_arch)"
+if [ -z "$ARCH_TAG" ]; then
+  warn "不支持的 CPU 架构: $(uname -m)。目前仅支持 amd64 / arm64 / armv7。"
+  exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# 获取二进制：优先级 = 显式传入 > 下载 release > 编译（无 Go 则先装 Go）。
+# 结果写入 BIN_SRC（本地文件路径），BIN_TMP=1 表示临时产物（安装后清理）。
+# ----------------------------------------------------------------------------
+
+# goarch_of <arch_tag> -> 输出 "GOARCH [GOARM]"（用于编译分支）
+goarch_of() {
+  case "$1" in
+    linux-amd64) printf 'amd64' ;;
+    linux-arm64) printf 'arm64' ;;
+    linux-armv7) printf 'arm 7' ;;
+  esac
+}
+
+# go_dist_arch <arch_tag> -> 输出 Go 官方 tarball 的架构名（装 Go 用）
+go_dist_arch() {
+  case "$1" in
+    linux-amd64) printf 'amd64' ;;
+    linux-arm64) printf 'arm64' ;;
+    linux-armv7) printf 'armv6l' ;;
+  esac
+}
+
+# ensure_go 确保 go 可用：已装则返回；否则下载官方 tarball 装到 /usr/local/go。
+ensure_go() {
+  if command -v go >/dev/null 2>&1; then
+    return 0
+  fi
+  info "未检测到 Go，正在安装 Go ${GO_VERSION} ..."
+  local dist_arch tarball
+  dist_arch="$(go_dist_arch "$ARCH_TAG")"
+  tarball="go${GO_VERSION}.linux-${dist_arch}.tar.gz"
+  # 已存在 /usr/local/go/bin/go 则复用，否则下载解包。
+  if [ ! -x /usr/local/go/bin/go ]; then
+    curl -fL --retry 3 "https://go.dev/dl/${tarball}" -o "/tmp/${tarball}"
+    tar -C /usr/local -xzf "/tmp/${tarball}"
+    rm -f "/tmp/${tarball}"
+  fi
+  export PATH="/usr/local/go/bin:${PATH}"
+  command -v go >/dev/null 2>&1 || { warn "Go 安装失败，请手动安装后重试。"; exit 1; }
+}
+
+# build_from_source <arch_tag> <out> 拉取源码并交叉编译出二进制。
+build_from_source() {
+  local out="$2" goarch goarm workdir
+  read -r goarch goarm <<< "$(goarch_of "$1")"
+  workdir="$(mktemp -d)"
+
+  info "拉取源码并编译（GOOS=linux GOARCH=${goarch}${goarm:+ / GOARM=${goarm}}）..."
+  # 优先 git 浅克隆；git 缺失或克隆失败时回退到下载源码 tarball。
+  if command -v git >/dev/null 2>&1 && \
+     git clone --depth 1 "https://github.com/${REPO}.git" "$workdir/src" 2>/dev/null; then
+    :
+  else
+    mkdir -p "$workdir/src"
+    curl -fL "https://github.com/${REPO}/archive/refs/heads/main.tar.gz" \
+      | tar -xz -C "$workdir/src" --strip-components=1
+  fi
+  (
+    cd "$workdir/src" || exit 1
+    export GOOS=linux GOARCH="$goarch" CGO_ENABLED=0
+    if [ -n "$goarm" ]; then export GOARM="$goarm"; fi
+    go build -trimpath -o "$out" ./cmd/dnsproxy
+  )
+  rm -rf "$workdir"
+}
+
+# obtain_binary 确定 BIN_SRC：显式传入 > 下载 release > 编译。
+obtain_binary() {
+  local url
+  if [ -n "$BIN_ARG" ]; then
+    if [ ! -f "$BIN_ARG" ]; then
+      warn "指定的二进制不存在: $BIN_ARG"
+      exit 1
+    fi
+    BIN_SRC="$BIN_ARG"
+    BIN_TMP=0
+    ok "使用本地二进制: $BIN_SRC"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "自动获取二进制需要 curl，请先安装（如 apt install curl）。"
+    exit 1
+  fi
+
+  BIN_SRC="$(mktemp "/tmp/${BIN_NAME}.XXXXXX")"
+  BIN_TMP=1
+  url="https://github.com/${REPO}/releases/${VERSION}/download/${BIN_NAME}-${ARCH_TAG}"
+
+  info "检测到架构: ${ARCH_TAG}"
+  say "  尝试下载预编译 release ..."
+  if curl -fL --retry 3 -o "$BIN_SRC" "$url"; then
+    chmod +x "$BIN_SRC"
+    ok "已下载 release 二进制（${VERSION}）。"
+    return 0
+  fi
+  warn "未找到匹配的 release（${url}），回退到源码编译。"
+
+  ensure_go
+  build_from_source "$ARCH_TAG" "$BIN_SRC"
+  ok "源码编译完成。"
+}
 
 say ""
 say "=========================================================="
@@ -632,16 +774,12 @@ EOF
 ok "已生成配置文件: ${CONF_FILE}"
 
 # --- 7. 安装二进制 ---
-if [ ! -f "$BIN_SRC" ]; then
-  warn "找不到二进制 $BIN_SRC"
-  say "  请先构建并上传到本机（例如 /root/）："
-  say "    GOOS=linux GOARCH=amd64 go build -o dnsproxy-scheduler ./cmd/dnsproxy"
-  say "    scp dnsproxy-scheduler root@VPS:/root/"
-  say "  然后重新运行: bash $0 /root/dnsproxy-scheduler"
-  exit 1
-fi
+obtain_binary
 install -m 0755 "$BIN_SRC" "${INSTALL_DIR}/${SERVICE}"
 ok "已安装二进制: ${INSTALL_DIR}/${SERVICE}"
+if [ "${BIN_TMP:-0}" = "1" ]; then
+  rm -f "$BIN_SRC"
+fi
 
 # --- 8. 证书申请（acme 模式）---
 if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then

@@ -51,7 +51,19 @@ dnsproxy/
 
 ## 快速开始
 
-### ① 本地编译出 Linux 二进制
+### ① 一键安装（推荐，Linux + systemd）
+
+在目标服务器上以 root 执行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/M1s4k1/dnsproxy/main/interactive-setup.sh)
+```
+
+脚本会自动完成：**检查 root / 系统类型 / CPU 架构（amd64·arm64·armv7）→ 获取二进制（有匹配架构的 Release 直接下载，否则源码编译，未装 Go 则先装官方 Go）→ 交互引导填配置 → 生成 `config.yaml` → 安装二进制 → 申请证书（acme.sh + DNS-01，仅加密协议开启时）→ 写 systemd 单元并启动服务**。
+
+> fork 本项目后，把脚本里的 `REPO="M1s4k1/dnsproxy"` 改成你自己的仓库，即可从你自己的 Release 下载。
+
+### ② 手动：本地编译 + 上传
 
 在**本项目根目录**（`dnsproxy/`）执行，按目标服务器架构选择：
 
@@ -62,24 +74,22 @@ GOOS=linux GOARCH=arm64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # arm64
 
 > 需要 Go 1.26+。本地没装那么新也没关系——`GOTOOLCHAIN=auto`（默认）会自动下载对应工具链，首次构建需联网。
 
-### ② 上传二进制和脚本到服务器
+上传二进制和脚本到服务器：
 
 ```bash
 scp dnsproxy-scheduler interactive-setup.sh root@SERVER_IP:/root/
 ```
 
-### ③ 在服务器上跑交互脚本（完成部署）
+在服务器上跑交互脚本（完成部署）：
 
 ```bash
 ssh root@SERVER_IP
-bash /root/interactive-setup.sh
+bash /root/interactive-setup.sh /root/dnsproxy-scheduler   # 显式传入本地二进制
 ```
 
-> 脚本默认在「脚本同目录」下查找二进制（`dnsproxy-scheduler`），所以把二进制和脚本都放到 `/root/` 后，无需再传位置参数。
+> 脚本也支持不带参数运行，此时会走「下载 Release → 源码编译 → 安装 Go」的自动获取流程；带本地二进制路径参数则直接使用，跳过获取。
 
-脚本会一步步引导你：**入站监听（每种协议是否开启 + 端口）→ 域名/证书 → ECS 策略 → 探测参数 → 缓存与引导 → 上游 DNS**，然后自动完成：生成 `config.yaml` → 安装二进制到 `/usr/local/bin/` → 申请证书（acme.sh + DNS-01，仅加密协议开启时）→ 写 systemd 单元 → 启动服务。
-
-> 脚本**不做编译**，只做「填配置 + 部署」。所以必须先完成第 ① 步拿到二进制。
+脚本会一步步引导你：**入站监听（每种协议是否开启 + 端口）→ 域名/证书 → ECS 策略 → 探测参数 → 缓存与引导 → 上游 DNS**。
 
 ### 验证
 
@@ -326,11 +336,28 @@ go vet ./...    # 静态检查
 gofmt -l ./cmd ./internal   # 检查格式
 ```
 
+### GitHub Actions 自动发布
+
+推送 `v*` 标签（如 `v1.0.0`）会触发 [.github/workflows/release.yml](.github/workflows/release.yml)，交叉编译以下平台并发布到 GitHub Release：
+
+| 平台 | 架构 | 产物名 |
+| --- | --- | --- |
+| Linux | amd64 / arm64 / armv7 | `dnsproxy-scheduler-linux-{amd64,arm64,armv7}` |
+| macOS | amd64 / arm64 | `dnsproxy-scheduler-darwin-{amd64,arm64}` |
+| Windows | amd64 / arm64 | `dnsproxy-scheduler-windows-{amd64,arm64}.exe` |
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+发布后，服务器上的 `interactive-setup.sh` 会优先从 Release 下载匹配架构的二进制（见上文一键安装）。
+
 ## 部署
 
 ### 方式一：交互式脚本（推荐）
 
-见上文「快速开始」。脚本本身不编译，只负责在服务器上装二进制、生成配置、申请证书、写 systemd 并启动。
+见上文「快速开始」。脚本负责「获取二进制（下载 Release / 源码编译）→ 生成配置 → 申请证书 → 写 systemd 并启动」。
 
 ### 方式二：手动
 
