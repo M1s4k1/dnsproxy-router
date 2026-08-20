@@ -82,6 +82,10 @@ type Config struct {
 	CacheEnabled *bool `yaml:"cache_enabled"`
 	// CacheSizeBytes: 响应缓存大小（字节），仅在 CacheEnabled 时生效。
 	CacheSizeBytes int `yaml:"cache_size_bytes"`
+	// CacheTTL: 缓存固定过期时间（如 30m）。<=0 表示跟随记录自身的 TTL。
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+	// CacheEviction: 缓存逐出策略：fifo / lru / lfu。
+	CacheEviction string `yaml:"cache_eviction"`
 	// Bootstrap: 解析上游主机名用的引导 DNS（明文）。
 	Bootstrap []string `yaml:"bootstrap"`
 	// BootstrapCacheTTL: 引导解析结果的缓存时长（0 表示不缓存）。
@@ -139,6 +143,8 @@ func DefaultConfig() Config {
 		ProbeDomain:    "example.com.",
 		CacheEnabled:   boolPtr(true),
 		CacheSizeBytes: 64 * 1024 * 1024,
+		CacheTTL:       30 * time.Minute,
+		CacheEviction:  "lru",
 		Bootstrap:      []string{"1.1.1.1:53", "8.8.8.8:53"},
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
@@ -248,6 +254,17 @@ func (c *Config) normalize() error {
 	}
 	if c.CacheSizeBytes <= 0 {
 		c.CacheSizeBytes = 64 * 1024 * 1024
+	}
+	if c.CacheTTL <= 0 {
+		c.CacheTTL = 30 * time.Minute
+	}
+	if c.CacheEviction == "" {
+		c.CacheEviction = "lru"
+	}
+	switch c.CacheEviction {
+	case "fifo", "lru", "lfu":
+	default:
+		return fmt.Errorf("cache_eviction 必须为 fifo/lru/lfu，当前为 %q", c.CacheEviction)
 	}
 	if len(c.Bootstrap) == 0 {
 		c.Bootstrap = []string{"1.1.1.1:53", "8.8.8.8:53"}

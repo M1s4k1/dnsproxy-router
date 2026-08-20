@@ -149,6 +149,74 @@ normalize_upstream_addr() {
   printf '%s' "${scheme}://${host}${path}"
 }
 
+# ============================================================================
+# DNS 提供商（acme.sh DNS-01）
+# 脚本只负责「选 provider + 收集凭证 + 调 acme.sh」，签发/续期逻辑全部复用
+# acme.sh 内置的 dnsapi（dns_<provider>.sh），因此支持 acme.sh 的全部提供商。
+# 下面仅预置常用站到菜单；任何其它 provider 可用「手动输入」覆盖。
+# ============================================================================
+
+# provider_vars <provider> -> 该 provider 需要的凭证变量（空格分隔）
+provider_vars() {
+  case "$1" in
+    cloudflare)  printf 'CF_Token' ;;
+    ali)         printf 'Ali_Key Ali_Secret' ;;
+    dp)          printf 'DP_Id DP_Key' ;;
+    dpi)         printf 'DPI_Id DPI_Key' ;;
+    tencent)     printf 'Tencent_SecretId Tencent_SecretKey' ;;
+    huaweicloud) printf 'HUAWEICLOUD_Username HUAWEICLOUD_Password HUAWEICLOUD_DomainName' ;;
+    gd)          printf 'GD_Key GD_Secret' ;;
+    namecheap)   printf 'NAMECHEAP_USERNAME NAMECHEAP_API_KEY' ;;
+    *)           printf '' ;;
+  esac
+}
+
+# var_label <变量名> -> 可读提示
+var_label() {
+  case "$1" in
+    CF_Token)               printf 'Cloudflare API Token' ;;
+    Ali_Key)                printf '阿里云 AccessKey ID' ;;
+    Ali_Secret)             printf '阿里云 AccessKey Secret' ;;
+    DP_Id)                  printf 'DNSPod.cn ID' ;;
+    DP_Key)                 printf 'DNSPod.cn Token' ;;
+    DPI_Id)                 printf 'DNSPod.com ID' ;;
+    DPI_Key)                printf 'DNSPod.com Token' ;;
+    Tencent_SecretId)       printf '腾讯云 SecretId' ;;
+    Tencent_SecretKey)      printf '腾讯云 SecretKey' ;;
+    HUAWEICLOUD_Username)   printf '华为云 IAM 用户名' ;;
+    HUAWEICLOUD_Password)   printf '华为云 IAM 密码' ;;
+    HUAWEICLOUD_DomainName) printf '华为云 DNS 域名' ;;
+    GD_Key)                 printf 'GoDaddy API Key' ;;
+    GD_Secret)              printf 'GoDaddy API Secret' ;;
+    NAMECHEAP_USERNAME)     printf 'Namecheap 用户名' ;;
+    NAMECHEAP_API_KEY)      printf 'Namecheap API Key' ;;
+    *)                      printf '%s' "$1" ;;
+  esac
+}
+
+# collect_credentials <provider> -> 逐个读取并 export 该 provider 的凭证变量
+collect_credentials() {
+  local p="$1" vars var val
+  vars="$(provider_vars "$p")"
+  if [ -z "$vars" ]; then
+    say "  该 provider 无预置凭证变量，请确保已自行 export 对应环境变量。"
+    return 0
+  fi
+  for var in $vars; do
+    if [ -n "${!var:-}" ]; then
+      say "  检测到环境变量 ${var}，将使用它。"
+      continue
+    fi
+    read -rsp "  $(var_label "$var")（${var}，输入不回显）: " val
+    say ""
+    if [ -n "$val" ]; then
+      export "${var}=${val}"
+    else
+      warn "  ${var} 未提供，稍后签发可能失败。"
+    fi
+  done
+}
+
 # --- 0. 前置检查 ---
 if [ "$(id -u)" -ne 0 ]; then
   warn "请用 root 执行（或 sudo）。"
@@ -284,19 +352,27 @@ if [ "$NEEDS_TLS" = "true" ]; then
     CERT_PATH="${CERT_DIR}/fullchain.pem"
     KEY_PATH="${CERT_DIR}/privkey.pem"
     CERT_EMAIL="$(ask "注册邮箱（证书到期提醒）" "you@example.com")"
-    CERT_PROVIDER="$(ask "DNS API 提供商（acme DNS-01）" "cloudflare")"
 
-    # Cloudflare 需要 API Token
-    if [ "$CERT_PROVIDER" = "cloudflare" ]; then
-      if [ -n "${CF_TOKEN:-}" ]; then
-        say "  检测到环境变量 CF_TOKEN，将使用它。"
-        CF_Token="$CF_TOKEN"
-      else
-        read -rsp "  Cloudflare API Token（Zone>DNS>Edit，输入不回显）: " CF_Token
-        say ""
-        [ -z "$CF_Token" ] && { warn "未提供 Token，稍后申请证书会失败。"; }
-      fi
-    fi
+    say "  DNS API 提供商（用于 DNS-01 验证）："
+    say "    1) cloudflare    2) 阿里云 ali      3) DNSPod.cn dp"
+    say "    4) DNSPod.com dpi  5) 腾讯云 tencent  6) 华为云 huaweicloud"
+    say "    7) GoDaddy gd    8) Namecheap      9) 手动输入 provider 名"
+    CERT_PROVIDER="$(ask "  选择提供商" "1")"
+    case "${CERT_PROVIDER:-1}" in
+      1) CERT_PROVIDER="cloudflare" ;;
+      2) CERT_PROVIDER="ali" ;;
+      3) CERT_PROVIDER="dp" ;;
+      4) CERT_PROVIDER="dpi" ;;
+      5) CERT_PROVIDER="tencent" ;;
+      6) CERT_PROVIDER="huaweicloud" ;;
+      7) CERT_PROVIDER="gd" ;;
+      8) CERT_PROVIDER="namecheap" ;;
+      9) CERT_PROVIDER="$(ask "    手动输入 acme.sh provider 名（如 dns_xxx 中的 xxx）" "")" ;;
+      *) CERT_PROVIDER="cloudflare" ;;
+    esac
+
+    # 按所选 provider 收集凭证（复用 acme.sh 约定的环境变量名）。
+    collect_credentials "$CERT_PROVIDER"
   fi
 else
   # 仅明文 DNS，无需域名与证书。
@@ -323,13 +399,25 @@ PROBE_DOMAIN="$(ask "探测用域名" "example.com.")"
 say ""
 info "【4/6】缓存与引导 DNS"
 
-# 响应缓存：先问是否开启，开启才问大小。
+# 响应缓存：先问是否开启，开启才问大小/过期时间/逐出策略。
 if ask_yn "开启 DNS 响应缓存（若客户端已做本地缓存，可关闭）" "y"; then
   CACHE_ENABLED="true"
   CACHE_SIZE="$(ask_int "响应缓存大小（字节）" "67108864" 1)"
+  CACHE_TTL="$(ask_duration "缓存固定过期时间（如 30m/1h；0s 表示跟随记录自身 TTL）" "30m")"
+  say "  缓存逐出策略："
+  say "    1) FIFO 先进先出（最早插入的先逐出）"
+  say "    2) LRU  最近最少使用（最久未访问的先逐出，推荐）"
+  say "    3) LFU  最不经常使用（访问次数最少的先逐出）"
+  case "$(ask "  选择逐出策略（1/2/3）" "2")" in
+    1) CACHE_EVICTION="fifo" ;;
+    3) CACHE_EVICTION="lfu" ;;
+    *) CACHE_EVICTION="lru" ;;
+  esac
 else
   CACHE_ENABLED="false"
   CACHE_SIZE="0"
+  CACHE_TTL="0s"
+  CACHE_EVICTION="lru"
 fi
 
 BOOTSTRAP_INPUT="$(ask "引导 DNS（逗号分隔，用于解析上游域名）" "1.1.1.1:53,8.8.8.8:53")"
@@ -426,6 +514,8 @@ probe_domain: "${PROBE_DOMAIN}"
 
 cache_enabled: ${CACHE_ENABLED}
 cache_size_bytes: ${CACHE_SIZE}
+cache_ttl: ${CACHE_TTL}
+cache_eviction: ${CACHE_EVICTION}
 
 bootstrap:
 ${BOOTSTRAP_LIST}
@@ -459,22 +549,17 @@ if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then
   fi
   ACME="${HOME}/.acme.sh/acme.sh"
 
-  if [ "$CERT_PROVIDER" = "cloudflare" ]; then
-    export CF_Token="${CF_Token:-${CF_TOKEN:-}}"
-    "$ACME" --issue --dns dns_cf -d "$DOMAIN" --server letsencrypt
+  # 签发：dns_<provider> 对应 acme.sh 内置的 dnsapi 脚本，凭证已 export 进环境。
+  "$ACME" --issue --dns "dns_${CERT_PROVIDER}" -d "$DOMAIN" --server letsencrypt
 
-    # --issue 成功后把证书安装到 config.yaml 指定的目标路径。
-    # 注意：--issue 签出的证书在 ~/.acme.sh/<domain>/，并不在目标路径，
-    # 必须靠 --install-cert 复制过去，否则 Go 程序加载证书会失败。
-    "$ACME" --install-cert -d "$DOMAIN" \
-      --key-file       "$KEY_PATH" \
-      --fullchain-file "$CERT_PATH" \
-      --reloadcmd      "systemctl restart ${SERVICE}"
-    ok "证书已安装，续期后自动重启服务。"
-  else
-    warn "非 cloudflare 的 provider 请手动签发证书后，把 cert.mode 改为 existing。"
-    warn "跳过自动签发。"
-  fi
+  # --issue 成功后把证书安装到 config.yaml 指定的目标路径。
+  # 注意：--issue 签出的证书在 ~/.acme.sh/<domain>/，并不在目标路径，
+  # 必须靠 --install-cert 复制过去，否则 Go 程序加载证书会失败。
+  "$ACME" --install-cert -d "$DOMAIN" \
+    --key-file       "$KEY_PATH" \
+    --fullchain-file "$CERT_PATH" \
+    --reloadcmd      "systemctl restart ${SERVICE}"
+  ok "证书已安装，续期后自动重启服务。"
 fi
 
 # --- 9. systemd 单元 + 启动 ---
