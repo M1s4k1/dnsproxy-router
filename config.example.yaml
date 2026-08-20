@@ -60,6 +60,17 @@ bootstrap:
 # 引导解析结果缓存时长（0s 表示不缓存）
 bootstrap_cache_ttl: 5s
 
+# 上游域名 → IP 静态映射：命中即直接用给定 IP，不再走引导 DNS。
+# 键为上游主机名（可带或不带尾部点），值为 IP 列表（IPv4/IPv6 均可）。
+# 同时配 IPv4/IPv6 时，由 prefer_ipv6 决定优先用哪族，连接失败自动回退另一族。
+hosts: {}
+#  example.com:
+#    - "1.2.3.4"
+#    - "2001:db8::1"
+
+# 域名同时有 IPv4/IPv6 时是否优先使用 IPv6（默认 false，即 IPv4 优先）。
+prefer_ipv6: false
+
 # 上游服务商 → 查询模式 → 地址
 # 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
 # 地址格式：https://host/dns-query | tls://host:853 | quic://host:853 | udp://host:53
