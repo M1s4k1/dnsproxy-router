@@ -1,8 +1,5 @@
 // Package cache 实现 DNS 响应缓存，支持固定过期时间与 FIFO/LRU/LFU 三种逐出策略。
-//
-// 库（AdguardTeam/dnsproxy）自带的 per-route 缓存只支持 LRU 且 TTL 跟随记录自身，
-// 无法满足「固定过期时间 + 可选逐出策略」的需求，故此处自建缓存，并在 scheduler
-// 层以「共享缓存包装上游」的方式接入（见 internal/scheduler 的 cachingUpstream）。
+// 库自带的 per-route 缓存只支持 LRU 且 TTL 跟随记录自身，无法满足需求，故自建。
 package cache
 
 import (

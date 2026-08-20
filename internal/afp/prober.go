@@ -100,13 +100,12 @@ func (p *Prober) probe(ctx context.Context) {
 			if err != nil || len(addrs) == 0 {
 				return
 			}
-			mu.Lock()
-			defer mu.Unlock()
 			for _, a := range addrs {
 				rtt, ok := p.measure(a, t.Port)
 				if !ok {
 					continue
 				}
+				mu.Lock()
 				if a.Is6() {
 					v6Count++
 					v6Total += rtt
@@ -114,6 +113,7 @@ func (p *Prober) probe(ctx context.Context) {
 					v4Count++
 					v4Total += rtt
 				}
+				mu.Unlock()
 			}
 		}(t)
 	}
@@ -149,7 +149,7 @@ func (p *Prober) probe(ctx context.Context) {
 // measure 用 TCP 连接测单个 IP:port 的延迟；失败返回 ok=false。
 func (p *Prober) measure(addr netip.Addr, port uint16) (time.Duration, bool) {
 	start := p.now()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(addr.String(), itoa(port)), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(addr.String(), strconv.FormatUint(uint64(port), 10)), 2*time.Second)
 	if err != nil {
 		return 0, false
 	}
@@ -162,8 +162,4 @@ func durMs(total time.Duration, n int) float64 {
 		return 0
 	}
 	return float64(total.Milliseconds()) / float64(n)
-}
-
-func itoa(p uint16) string {
-	return strconv.FormatUint(uint64(p), 10)
 }

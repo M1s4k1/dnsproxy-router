@@ -87,8 +87,8 @@ type Config struct {
 	CacheEnabled *bool `yaml:"cache_enabled"`
 	// CacheSizeBytes: 响应缓存大小（字节），仅在 CacheEnabled 时生效。
 	CacheSizeBytes int `yaml:"cache_size_bytes"`
-	// CacheTTL: 缓存固定过期时间（如 30m）。<=0 表示跟随记录自身的 TTL。
-	CacheTTL time.Duration `yaml:"cache_ttl"`
+	// CacheTTL: 缓存固定过期时间（如 30m）。nil 表示使用默认 30m；0 表示跟随记录自身的 TTL。
+	CacheTTL *time.Duration `yaml:"cache_ttl"`
 	// CacheEviction: 缓存逐出策略：fifo / lru / lfu。
 	CacheEviction string `yaml:"cache_eviction"`
 	// Bootstrap: 解析上游主机名用的引导 DNS（明文）。
@@ -120,6 +120,11 @@ type Config struct {
 // boolPtr 返回指向 b 的指针，用于构造可选 bool 字段的默认值。
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// durationPtr 返回指向 d 的指针，用于构造可选 duration 字段的默认值。
+func durationPtr(d time.Duration) *time.Duration {
+	return &d
 }
 
 // validateDoHPath 校验 DoH 请求路径：必须以 / 开头、不含查询串/片段、无非法转义。
@@ -165,7 +170,7 @@ func DefaultConfig() Config {
 		ProbeDomain:    "example.com.",
 		CacheEnabled:   boolPtr(true),
 		CacheSizeBytes: 64 * 1024 * 1024,
-		CacheTTL:       30 * time.Minute,
+		CacheTTL:       durationPtr(30 * time.Minute),
 		CacheEviction:  "lru",
 		Bootstrap:      []string{"1.1.1.1:53", "8.8.8.8:53"},
 		// Hosts 默认留空：域名→IP 静态映射属用户私密配置，请通过 config.yaml
@@ -287,8 +292,8 @@ func (c *Config) normalize() error {
 	if c.CacheSizeBytes <= 0 {
 		c.CacheSizeBytes = 64 * 1024 * 1024
 	}
-	if c.CacheTTL <= 0 {
-		c.CacheTTL = 30 * time.Minute
+	if c.CacheTTL == nil {
+		c.CacheTTL = durationPtr(30 * time.Minute)
 	}
 	if c.CacheEviction == "" {
 		c.CacheEviction = "lru"

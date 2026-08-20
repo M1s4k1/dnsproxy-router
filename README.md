@@ -2,13 +2,13 @@
 
 一个对外提供 **DoH / DoT / DoQ / 明文 DNS** 的 DNS 代理，内部对多家上游服务商做「动态择优 + 并发赛马」。
 
-基于 [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) 库构建，只额外实现调度层与 ECS 策略，DNS 编解码、各协议前端、缓存、去重均由成熟库承担。
+基于 [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) 库构建，DNS 编解码、各协议前端、去重由成熟库承担；调度层（选路、赛马、响应缓存、ECS 策略、引导解析）为自建实现。
 
 ## 特性
 
 - **多协议入站**：入站监听支持 DoH / DoT / DoQ / 明文 DNS（UDP+TCP），各自独立开关与端口。
 - **动态择优**：周期性探测每家上游各模式的延迟，自动为每家选出延迟最低的模式。
-- **并发赛马**：每次查询向各家「当前最优线路」并发发出，谁先成功返回就用谁。
+- **并发赛马**：每次查询向各家「当前最优线路」并发发出，支持「最快返回」与「加权 + 延时窗口」两种选择模式。
 - **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
 - **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
 - **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
@@ -22,8 +22,11 @@ dnsproxy/
 ├── internal/
 │   ├── config/                 # YAML 配置的加载与校验
 │   ├── ecs/                    # EDNS Client Subnet 策略
-│   ├── scheduler/              # 周期性探测 + 选路 + 连接复用
-│   └── handler/                # 把选路注入每个请求（赛马）
+│   ├── scheduler/              # 周期性探测 + 选路 + 赛马 + 缓存
+│   ├── handler/                # 把选路注入每个请求
+│   ├── cache/                  # 自建 DNS 响应缓存（TTL + 逐出策略）
+│   ├── bootstrap/              # 引导解析缓存 + 域名→IP 静态映射
+│   └── afp/                    # 地址族优先级（按延迟动态选族）
 ├── config.example.yaml         # 配置示例（复制为 config.yaml 后使用）
 ├── interactive-setup.sh        # 交互式部署脚本（服务器上运行）
 └── go.mod / go.sum
@@ -44,7 +47,7 @@ dnsproxy/
 ```
 
 - **外层（scheduler）**：每 `probe_interval`（默认 15m）探测，每家各模式探测 `probe_count` 次取中位数 RTT，选出每家延迟最低的模式。
-- **内层（赛马）**：每次收到查询，向各家「当前最优线路」并发查询，谁先成功返回就用谁（`proxy.UpstreamModeParallel`）。
+- **内层（赛马）**：每次收到查询，向各家「当前最优线路」并发查询，按 `upstream_mode` 选择结果——`fastest`（谁先成功返回用谁）或 `weighted`（加权 + 延时窗口）。
 
 ## 快速开始
 
@@ -129,8 +132,8 @@ dig @你的域名 example.com A
 | `cache_size_bytes` | 响应缓存大小（仅开启时生效） | `67108864` |
 | `cache_ttl` | 缓存固定过期时间（`0s` 表示跟随记录自身 TTL） | `30m` |
 | `cache_eviction` | 逐出策略：`fifo` \| `lru` \| `lfu` | `lru` |
-| `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53` |
-| `bootstrap_cache_ttl` | 引导解析结果缓存时长（0 关闭） | `5s` |
+| `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53, 8.8.8.8:53` |
+| `bootstrap_cache_ttl` | 引导解析结果缓存时长（`0s` 关闭） | `0s` |
 | `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
 | `ip_priority` | 双栈时的地址族优先级：`ipv4` \| `ipv6` \| `latency` | `ipv4` |
 | `ip_latency_interval` | `latency` 模式的延迟探测周期 | `15m` |
@@ -265,7 +268,7 @@ race_window: 50ms
 
 - 例如上面例子：`cf` 最快返回，其后 50ms 内 `next` 和 `adguard` 也返回了，则这三个都有效；最终返回权重最高的 `adguard`（20）。
 - 未在 `upstream_weights` 中列出的服务商默认权重 1（最低）。
-- `race_window` 越大，越偏向「等权重最高的那家」；越小越接近「最快返回」。设 `0` 实际就是最快返回。
+- `race_window` 越大，越偏向「等权重最高的那家」；越小越接近「最快返回」。
 - `fastest` 模式下 `upstream_weights` 与 `race_window` 均被忽略。
 
 ### `dns` 字段：服务商 → 模式 → 地址

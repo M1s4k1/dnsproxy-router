@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,14 +9,12 @@ import (
 
 // fakeUpstream 返回可配置延迟的固定响应，用于测试赛马选择逻辑。
 type fakeUpstream struct {
-	addr    string
-	delay   time.Duration
-	id      string // 写入响应的 Extra，便于断言选中的是哪家
-	exchang atomic.Int64
+	addr  string
+	delay time.Duration
+	id    string // 写入响应，便于断言选中的是哪家
 }
 
 func (f *fakeUpstream) Exchange(req *dns.Msg) (*dns.Msg, error) {
-	f.exchang.Add(1)
 	time.Sleep(f.delay)
 	resp := new(dns.Msg)
 	resp.SetReply(req)
@@ -44,7 +41,6 @@ func question() *dns.Msg {
 
 func member(name string, weight int, delay time.Duration) racingMember {
 	return racingMember{
-		name:     name,
 		weight:   weight,
 		upstream: &fakeUpstream{addr: name, delay: delay, id: name},
 	}
@@ -121,5 +117,21 @@ func TestSingleMember(t *testing.T) {
 	r := newRacing([]racingMember{member("only", 7, 1*time.Millisecond)}, true, 50*time.Millisecond)
 	if got := chosenID(t, r); got != "only" {
 		t.Fatalf("单成员应透传 only，得到 %q", got)
+	}
+}
+
+// TestWeightedReturnsAtWindowEnd 验证窗口结束后立即返回，不等慢上游。
+func TestWeightedReturnsAtWindowEnd(t *testing.T) {
+	r := newRacing([]racingMember{
+		member("first", 1, 5*time.Millisecond),   // 首个成功，开启窗口
+		member("slow", 20, 500*time.Millisecond), // 窗口外才返回（权重最高）
+	}, true, 30*time.Millisecond)
+
+	start := time.Now()
+	if got := chosenID(t, r); got != "first" {
+		t.Fatalf("窗口内应选 first，得到 %q", got)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("窗口结束应即返回，不应等慢上游；耗时 %v", elapsed)
 	}
 }
