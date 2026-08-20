@@ -189,7 +189,7 @@ hosts:
   dns.example.com:
     - "1.2.3.4"
     - "2001:db8::1"
-prefer_ipv6: true
+ip_priority: ipv6
 dns:
   cf:
     DNS-over-HTTPS: "https://example.com/dns-query"
@@ -204,8 +204,8 @@ dns:
 	if len(c.Hosts["dns.example.com"]) != 2 {
 		t.Fatalf("Hosts 解析错误: %+v", c.Hosts)
 	}
-	if !c.PreferIPv6 {
-		t.Fatalf("PreferIPv6 应已开启")
+	if c.IPPriority != "ipv6" {
+		t.Fatalf("IPPriority 应已开启，得到 %q", c.IPPriority)
 	}
 }
 
@@ -230,5 +230,88 @@ dns:
 	}
 	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
 		t.Fatalf("非法 hosts IP 应报错")
+	}
+}
+
+func TestLoadConfigIPPriorityDefault(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.IPPriority != "ipv4" {
+		t.Fatalf("IPPriority 默认应为 ipv4，得到 %q", c.IPPriority)
+	}
+}
+
+func TestLoadConfigBadIPPriority(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+ip_priority: foo
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法 ip_priority 应报错")
+	}
+}
+
+func TestUpstreamTargets(t *testing.T) {
+	c := Config{
+		DNS: map[string]map[string]string{
+			"p1": {
+				"DNS-over-HTTPS": "https://doh.example.com:443/dns-query",
+				"DNS-over-TLS":   "tls://dot.example.com:853",
+			},
+			"p2": {
+				"Plain DNS": "udp://1.1.1.1:53",
+			},
+		},
+		Hosts: map[string][]string{
+			"onlyhosts.example.com": {"1.2.3.4"},
+		},
+	}
+
+	targets := c.UpstreamTargets()
+	got := make(map[string]uint16, len(targets))
+	for _, t := range targets {
+		got[t.Host] = t.Port
+	}
+
+	if got["doh.example.com"] != 443 {
+		t.Fatalf("DoH 端口应为 443，得到 %d", got["doh.example.com"])
+	}
+	if got["dot.example.com"] != 853 {
+		t.Fatalf("DoT 端口应为 853，得到 %d", got["dot.example.com"])
+	}
+	if got["onlyhosts.example.com"] != 443 {
+		t.Fatalf("hosts-only 域名默认端口应为 443，得到 %d", got["onlyhosts.example.com"])
+	}
+	if _, ok := got["1.1.1.1"]; ok {
+		t.Fatalf("IP 主机不应出现在探测目标中")
 	}
 }

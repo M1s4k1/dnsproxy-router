@@ -443,6 +443,7 @@ say "  上游域名 → IP 静态映射（可选）：对指定域名固定其�
 say "  例如上游主机名 dns.example.com 固定解析到 1.2.3.4。留空跳过。"
 HOSTS_BLOCK=""
 HOSTS_COUNT=0
+HOSTS_DUALSTACK=0
 while :; do
   say ""
   read -rp "  上游域名（留空结束）: " hname
@@ -453,11 +454,17 @@ while :; do
   [ -z "$haddrs" ] && continue
   HOSTS_BLOCK+="  \"${hname}\":"$'\n'
   IFS=',' read -ra HADDR_ARR <<< "$haddrs"
+  has_v4=0; has_v6=0
   for ha in "${HADDR_ARR[@]}"; do
     ha="$(printf '%s' "$ha" | xargs)"
     [ -z "$ha" ] && continue
     HOSTS_BLOCK+="    - \"${ha}\""$'\n'
+    case "$ha" in
+      *:*) has_v6=1 ;;
+      *)   has_v4=1 ;;
+    esac
   done
+  [ "$has_v4" -eq 1 ] && [ "$has_v6" -eq 1 ] && HOSTS_DUALSTACK=1
   HOSTS_COUNT=$((HOSTS_COUNT + 1))
 done
 
@@ -466,13 +473,6 @@ if [ "$HOSTS_COUNT" -gt 0 ]; then
   HOSTS_YAML="hosts:"$'\n'"${HOSTS_BLOCK}"
 else
   HOSTS_YAML="hosts: {}"$'\n'
-fi
-
-PREFER_IPV6="false"
-if [ "$HOSTS_COUNT" -gt 0 ]; then
-  if ask_yn "  域名同时有 IPv4/IPv6 时，是否优先使用 IPv6（默认 IPv4 优先）" "n"; then
-    PREFER_IPV6="true"
-  fi
 fi
 
 # --- 5. 上游 DNS（循环添加）---
@@ -507,6 +507,38 @@ while :; do
 done
 
 [ -z "$DNS_BLOCK" ] && { warn "未配置任何上游，退出。"; exit 1; }
+
+# 地址族优先级：当上游域名存在 IPv4/IPv6 双栈时，让用户选择优先级。
+# 触发条件有二：① hosts 映射中任一个域名同时配了 v4+v6；② 用引导 DNS 解析时
+# 用户确认上游 DNS 支持双栈。
+IP_PRIORITY="ipv4"
+IP_LATENCY_INTERVAL="15m"
+if [ "$HOSTS_DUALSTACK" -eq 1 ]; then
+  DUALSTACK="true"
+else
+  # 未通过 hosts 固定双栈，则询问引导 DNS 解析的上游是否支持双栈。
+  if ask_yn "  上游 DNS 域名是否支持双栈（同时解析出 IPv4 与 IPv6）" "n"; then
+    DUALSTACK="true"
+  else
+    DUALSTACK="false"
+  fi
+fi
+
+if [ "$DUALSTACK" = "true" ]; then
+  say ""
+  say "  上游域名存在 IPv4/IPv6 双栈，请选择地址族优先级："
+  say "    1) IPv4 优先（v6 作连接失败回退）"
+  say "    2) IPv6 优先（v4 作连接失败回退）"
+  say "    3) 按延迟优先（周期探测两族延迟，选延迟低者）"
+  case "$(ask "  选择优先级（1/2/3）" "1")" in
+    2) IP_PRIORITY="ipv6" ;;
+    3)
+      IP_PRIORITY="latency"
+      IP_LATENCY_INTERVAL="$(ask_duration "  延迟探测周期（如 15m/5m）" "15m")"
+      ;;
+    *) IP_PRIORITY="ipv4" ;;
+  esac
+fi
 
 # --- 6. 生成 config.yaml ---
 say ""
@@ -559,7 +591,8 @@ bootstrap:
 ${BOOTSTRAP_LIST}
 bootstrap_cache_ttl: ${BOOTSTRAP_CACHE_TTL}
 
-${HOSTS_YAML}prefer_ipv6: ${PREFER_IPV6}
+${HOSTS_YAML}ip_priority: ${IP_PRIORITY}
+ip_latency_interval: ${IP_LATENCY_INTERVAL}
 
 dns:
 ${DNS_BLOCK}

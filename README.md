@@ -132,7 +132,8 @@ dig @你的域名 example.com A
 | `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53` |
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（0 关闭） | `5s` |
 | `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
-| `prefer_ipv6` | 域名同时有 IPv4/IPv6 时是否优先用 IPv6 | `false` |
+| `ip_priority` | 双栈时的地址族优先级：`ipv4` \| `ipv6` \| `latency` | `ipv4` |
+| `ip_latency_interval` | `latency` 模式的延迟探测周期 | `15m` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
 
 ### `cert.provider`：DNS API 提供商（DNS-01）
@@ -212,12 +213,26 @@ hosts:
     - "2001:db8::1"     # 可同时配 IPv4 与 IPv6
   dns.example.net:
     - "5.6.7.8"
-prefer_ipv6: false
+ip_priority: ipv4
+ip_latency_interval: 15m
 ```
 
 - 键为上游主机名（可带或不带尾部点），值为 IP 列表（IPv4/IPv6 均可）。
 - 命中即直接使用给定 IP，不再查询引导 DNS；未命中的域名照常走引导 DNS。
-- 同一域名同时配 IPv4/IPv6 时，优先级由 `prefer_ipv6` 决定：`false`（默认）IPv4 优先、`true` IPv6 优先。首选地址族**连接失败时自动回退**另一族。
+
+### `ip_priority` 字段：双栈地址族优先级
+
+当上游域名同时能解析出 IPv4 与 IPv6（无论来自 `hosts` 静态映射还是引导 DNS）时，用 `ip_priority` 决定优先用哪一族的地址：
+
+| 值 | 行为 |
+| --- | --- |
+| `ipv4` | IPv4 优先，连接失败自动回退 IPv6（默认） |
+| `ipv6` | IPv6 优先，连接失败自动回退 IPv4 |
+| `latency` | 周期探测两族连接延迟，选全局平均延迟更低的一族 |
+
+- `latency` 模式下，程序每隔 `ip_latency_interval`（默认 `15m`）解析每个上游域名、分别测 IPv4/IPv6 的连接延迟，比较全局平均后切换优选族；两次探测之间使用上次选定的族。
+- 探测目标来自 `dns` 各模式地址的主机名（DoH→443、DoT/DoQ→853、明文→53），`hosts` 里额外出现的域名按 443 探测。
+- `ipv4` / `ipv6` 模式是静态偏好，`ip_latency_interval` 不生效。
 
 ### `dns` 字段：服务商 → 模式 → 地址
 
