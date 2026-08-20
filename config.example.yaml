@@ -49,6 +49,8 @@ probe_domain: "example.com."
 # 响应缓存
 cache_enabled: true        # 是否开启 DNS 响应缓存（false 关闭）
 cache_size_bytes: 67108864 # 缓存大小（字节），仅开启时生效
+cache_ttl: 30m             # 固定过期时间（如 30m/1h）；0s 表示跟随记录自身 TTL
+cache_eviction: lru        # 逐出策略：fifo（先进先出）| lru（最近最少用）| lfu（最不常用）
 
 # 解析上游主机名用的引导 DNS（明文）
 bootstrap:

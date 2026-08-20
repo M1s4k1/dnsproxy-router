@@ -120,16 +120,37 @@ dig @你的域名 example.com A
 | `cert.renew` | acme 模式是否自动续期 | `true` |
 | `cert.cert_path` / `cert.key_path` | 证书/私钥路径 | — |
 | `cert.email` | acme 注册邮箱 | — |
-| `cert.provider` | DNS API 提供商（acme DNS-01） | `cloudflare` |
+| `cert.provider` | DNS API 提供商（acme DNS-01，见下） | `cloudflare` |
 | `probe_interval` | 探测周期 | `15m` |
 | `probe_timeout` | 单次探测超时 | `3s` |
 | `probe_count` | 每模式探测次数（取中位数） | `3` |
 | `probe_domain` | 探测用域名 | `example.com.` |
 | `cache_enabled` | 是否开启响应缓存 | `true` |
 | `cache_size_bytes` | 响应缓存大小（仅开启时生效） | `67108864` |
+| `cache_ttl` | 缓存固定过期时间（`0s` 表示跟随记录自身 TTL） | `30m` |
+| `cache_eviction` | 逐出策略：`fifo` \| `lru` \| `lfu` | `lru` |
 | `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53` |
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（0 关闭） | `5s` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
+
+### `cert.provider`：DNS API 提供商（DNS-01）
+
+脚本复用 [acme.sh](https://github.com/acmesh-official/acme.sh) 的 DNS-01 机制，**支持 acme.sh 内置的全部提供商**。交互脚本预置了以下常用站到菜单，其余可通过「手动输入 provider 名」覆盖：
+
+| 菜单 | provider | 所需凭证（环境变量） |
+| --- | --- | --- |
+| 1 | `cloudflare` | `CF_Token` |
+| 2 | `ali`（阿里云） | `Ali_Key` + `Ali_Secret` |
+| 3 | `dp`（DNSPod.cn） | `DP_Id` + `DP_Key` |
+| 4 | `dpi`（DNSPod.com） | `DPI_Id` + `DPI_Key` |
+| 5 | `tencent`（腾讯云） | `Tencent_SecretId` + `Tencent_SecretKey` |
+| 6 | `huaweicloud`（华为云） | `HUAWEICLOUD_Username` + `HUAWEICLOUD_Password` + `HUAWEICLOUD_DomainName` |
+| 7 | `gd`（GoDaddy） | `GD_Key` + `GD_Secret` |
+| 8 | `namecheap` | `NAMECHEAP_USERNAME` + `NAMECHEAP_API_KEY` |
+
+- `provider` 名即 acme.sh 的 `dns_<provider>.sh` 后缀，凭证变量名与 acme.sh 约定完全一致。
+- 手动签发时可直接 `export` 对应环境变量再运行脚本，脚本检测到已存在的变量会跳过询问。
+- 证书续期由 acme.sh 的 cron 自动完成，签发成功即注册 `--reloadcmd` 自动重启服务，与 provider 无关。
 
 ### `listeners` 字段：入站监听
 
@@ -154,6 +175,29 @@ listeners:
 
 - 至少开启一种；`NeedsTLS`（DoH/DoT/DoQ 任一开启）时才需要配置 `cert`。
 - 明文 DNS 属无加密、易被劫持，一般仅建议在内网/可信网络，或作为兜底使用。
+
+### 响应缓存：过期时间与逐出策略
+
+开启缓存后，除大小（`cache_size_bytes`）外还可配置两个维度：
+
+- **过期时间（`cache_ttl`）**：固定过期时间，如 `30m` / `1h`。设 `0s` 表示不设固定值，跟随响应记录自身的 TTL。
+- **逐出策略（`cache_eviction`）**：缓存写满后，按哪种顺序淘汰旧条目：
+
+| 值 | 策略 | 逐出对象 |
+| --- | --- | --- |
+| `fifo` | 先进先出 | 最早插入的条目 |
+| `lru` | 最近最少使用 | 最久未被访问的条目 |
+| `lfu` | 最不经常使用 | 访问次数最少的条目（同次数按插入先后） |
+
+```yaml
+cache_enabled: true
+cache_size_bytes: 67108864
+cache_ttl: 30m
+cache_eviction: lru
+```
+
+- 命中缓存时，返回的响应各记录 TTL 会按剩余寿命递减；过期条目自动失效并重新向上游查询。
+- ECS 纳入缓存键，`pass` 模式下不同子网不会互相串缓存。
 
 ### `dns` 字段：服务商 → 模式 → 地址
 

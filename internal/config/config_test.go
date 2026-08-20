@@ -121,3 +121,57 @@ dns:
 		t.Fatalf("未开启任何监听时应报错")
 	}
 }
+
+func TestLoadConfigCacheFields(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+cache_enabled: true
+cache_size_bytes: 1024
+cache_ttl: 5m
+cache_eviction: lfu
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.CacheTTL.String() != "5m0s" {
+		t.Fatalf("CacheTTL 解析错误: %q", c.CacheTTL)
+	}
+	if c.CacheEviction != "lfu" {
+		t.Fatalf("CacheEviction 解析错误: %q", c.CacheEviction)
+	}
+}
+
+func TestLoadConfigBadEviction(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+cache_eviction: mru
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法逐出策略应报错")
+	}
+}
