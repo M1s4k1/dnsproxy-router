@@ -1,0 +1,60 @@
+# dnsproxy-scheduler 配置示例
+# 用法：复制为 config.yaml 后，把下面示例值替换成你自己的再启动。
+#   cp config.example.yaml config.yaml
+# 字段说明见 README。
+
+# 是否使用域名（true 时用域名签发证书，domain 为证书域名）
+use_domain: true
+domain: "example.com"
+
+# 对外 DoH 监听端口
+port: 443
+
+# DoH 端点请求路径（可自定义，支持多层子路径，如 /dns/query/v1）
+doh_path: "/dns-query"
+
+# EDNS Client Subnet 策略
+# mode: off（移除 EDNS）| pass（透传）| override（覆写为固定前缀）
+# address: override 模式下的固定前缀
+ecs:
+  mode: "off"
+  address: ""
+
+# 证书配置
+cert:
+  mode: "acme"          # acme（acme.sh 申请+续期）| existing（已有证书）
+  renew: true           # acme 模式下是否自动续期
+  cert_path: "/etc/dnsproxy/certs/fullchain.pem"
+  key_path:  "/etc/dnsproxy/certs/privkey.pem"
+  email: "you@example.com"
+  provider: "cloudflare"  # DNS API 提供商（acme DNS-01 用）
+
+# 探测参数
+probe_interval: 15m      # 探测周期
+probe_timeout: 3s        # 单次探测超时
+probe_count: 3           # 每模式探测次数（取中位数）
+probe_domain: "example.com."
+
+# 响应缓存
+cache_enabled: true        # 是否开启 DNS 响应缓存（false 关闭）
+cache_size_bytes: 67108864 # 缓存大小（字节），仅开启时生效
+
+# 解析上游主机名用的引导 DNS（明文）
+bootstrap:
+  - "1.1.1.1:53"
+  - "8.8.8.8:53"
+
+# 引导解析结果缓存时长（0s 表示不缓存）
+bootstrap_cache_ttl: 5s
+
+# 上游服务商 → 查询模式 → 地址
+# 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC
+# 地址格式：https://host/dns-query | tls://host:853 | quic://host:853
+#
+# 必填：在此配置你自己的上游（每个服务商可配一种或多种模式）。
+# 把下面示例中的值替换成你的真实端点后取消注释：
+#   provider-a:
+#     DNS-over-HTTPS: "https://dns.example.com/dns-query"
+#     DNS-over-TLS:   "tls://dns.example.com:853"
+#     DNS-over-QUIC:  "quic://dns.example.com:853"
+dns: {}
