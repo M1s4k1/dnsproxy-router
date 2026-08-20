@@ -89,8 +89,8 @@ ask_duration() {
 }
 
 # normalize_upstream_addr <模式> <地址> -> stdout 输出规范化后的上游地址
-# 规则：无 scheme 按模式补（DoH→https:// DoT→tls:// DoQ→quic://）；
-#       无端口按 scheme 补默认（DoH=443 DoT=853 DoQ=853）；
+# 规则：无 scheme 按模式补（DoH→https:// DoT→tls:// DoQ→quic:// Plain→udp://）；
+#       无端口按 scheme 补默认（DoH=443 DoT=853 DoQ=853 Plain=53）；
 #       DoH 无路径补 /dns-query。已有前缀/端口/路径则原样保留。
 normalize_upstream_addr() {
   local mode="$1" addr="$2"
@@ -99,6 +99,7 @@ normalize_upstream_addr() {
     DNS-over-HTTPS) scheme="https"; default_port=443 ;;
     DNS-over-TLS)   scheme="tls";   default_port=853 ;;
     DNS-over-QUIC)  scheme="quic";  default_port=853 ;;
+    "Plain DNS")    scheme="udp";   default_port=53  ;;
   esac
 
   local rest="$addr" host="" path=""
@@ -120,6 +121,11 @@ normalize_upstream_addr() {
   else
     host="$rest"
     path=""
+  fi
+
+  # 裸 IPv6（多个冒号、无方括号）→ 加方括号
+  if [[ "$host" != \[* ]] && [[ "$host" == *:*:* ]]; then
+    host="[${host}]"
   fi
 
   # host 是否已含端口
@@ -155,31 +161,68 @@ say "  dnsproxy-scheduler 交互式配置向导"
 say "=========================================================="
 say ""
 
-# --- 1. 基本配置 ---
-info "【1/6】基本配置"
+# --- 1. 入站监听 ---
+say ""
+info "【1/6】入站监听（对外提供的 DNS 协议）"
+say "  至少开启一种。加密协议（DoH/DoT/DoQ）需要 TLS 证书。"
 
-if ask_yn "是否使用域名（用于证书申请）" "y"; then
-  USE_DOMAIN="true"
-  DOMAIN="$(ask "域名" "example.com")"
+if ask_yn "开启 DoH（DNS-over-HTTPS）" "y"; then
+  DOH_ENABLED="true"
+  DOH_PORT="$(ask_int "  DoH 监听端口" "443" 1 65535)"
 else
-  USE_DOMAIN="false"
-  DOMAIN=""
+  DOH_ENABLED="false"
+  DOH_PORT="443"
 fi
 
-if ask_yn "使用标准端口 443（DoH 默认，推荐）" "y"; then
-  PORT=443
+if ask_yn "开启 DoT（DNS-over-TLS）" "n"; then
+  DOT_ENABLED="true"
+  DOT_PORT="$(ask_int "  DoT 监听端口" "853" 1 65535)"
 else
-  PORT="$(ask_int "自定义对外 DoH 监听端口" "443" 1 65535)"
+  DOT_ENABLED="false"
+  DOT_PORT="853"
 fi
 
-DOH_PATH="$(ask "DoH 端点路径（可自定义，支持多层，如 /dns/query/v1）" "/dns-query")"
-# 简单校验路径：以 / 开头且不以 / 结尾（根路径 / 除外）
-if [[ "$DOH_PATH" != /* ]]; then
-  warn "路径必须以 / 开头，已改为默认 /dns-query"
-  DOH_PATH="/dns-query"
-elif [ "$DOH_PATH" != "/" ] && [[ "$DOH_PATH" == */ ]]; then
-  warn "路径不能以 / 结尾，已去掉末尾 /"
-  DOH_PATH="${DOH_PATH%/}"
+if ask_yn "开启 DoQ（DNS-over-QUIC）" "n"; then
+  DOQ_ENABLED="true"
+  DOQ_PORT="$(ask_int "  DoQ 监听端口" "853" 1 65535)"
+else
+  DOQ_ENABLED="false"
+  DOQ_PORT="853"
+fi
+
+if ask_yn "开启明文 DNS（UDP+TCP 同端口）" "n"; then
+  PLAIN_ENABLED="true"
+  PLAIN_PORT="$(ask_int "  明文 DNS 监听端口" "53" 1 65535)"
+else
+  PLAIN_ENABLED="false"
+  PLAIN_PORT="53"
+fi
+
+if [ "$DOH_ENABLED" = "false" ] && [ "$DOT_ENABLED" = "false" ] && \
+   [ "$DOQ_ENABLED" = "false" ] && [ "$PLAIN_ENABLED" = "false" ]; then
+  warn "至少需开启一种入站监听，已默认开启 DoH。"
+  DOH_ENABLED="true"
+  DOH_PORT="443"
+fi
+
+DOH_PATH="/dns-query"
+if [ "$DOH_ENABLED" = "true" ]; then
+  DOH_PATH="$(ask "DoH 端点路径（可自定义，支持多层，如 /dns/query/v1）" "/dns-query")"
+  # 校验路径：以 / 开头且不以 / 结尾（根路径 / 除外）
+  if [[ "$DOH_PATH" != /* ]]; then
+    warn "路径必须以 / 开头，已改为默认 /dns-query"
+    DOH_PATH="/dns-query"
+  elif [ "$DOH_PATH" != "/" ] && [[ "$DOH_PATH" == */ ]]; then
+    warn "路径不能以 / 结尾，已去掉末尾 /"
+    DOH_PATH="${DOH_PATH%/}"
+  fi
+fi
+
+# 是否任一加密协议开启（决定是否需要 TLS 证书）。
+if [ "$DOH_ENABLED" = "true" ] || [ "$DOT_ENABLED" = "true" ] || [ "$DOQ_ENABLED" = "true" ]; then
+  NEEDS_TLS="true"
+else
+  NEEDS_TLS="false"
 fi
 
 # ECS（EDNS Client Subnet）策略
@@ -210,40 +253,62 @@ case "${ECS_CHOICE:-0}" in
     ;;
 esac
 
-# --- 2. 证书配置 ---
+# --- 2. 域名与证书配置 ---
 say ""
-info "【2/6】证书配置"
-say "  DoH 必须使用 HTTPS，因此需要一个 TLS 证书。"
-say "  1) acme.sh 申请并自动续期（推荐，DNS-01 无需开放 80）"
-say "  2) 使用已有证书（指定文件路径）"
-CERT_CHOICE="$(ask "证书方式" "1")"
+info "【2/6】域名与证书配置"
 
-if [ "$CERT_CHOICE" = "2" ]; then
-  CERT_MODE="existing"
-  CERT_RENEW="false"
-  CERT_PATH="$(ask "证书（fullchain）路径" "/etc/dnsproxy/certs/fullchain.pem")"
-  KEY_PATH="$(ask "私钥路径" "/etc/dnsproxy/certs/privkey.pem")"
-  CERT_EMAIL=""
-  CERT_PROVIDER=""
-else
-  CERT_MODE="acme"
-  CERT_RENEW="true"
-  CERT_PATH="${CERT_DIR}/fullchain.pem"
-  KEY_PATH="${CERT_DIR}/privkey.pem"
-  CERT_EMAIL="$(ask "注册邮箱（证书到期提醒）" "you@example.com")"
-  CERT_PROVIDER="$(ask "DNS API 提供商（acme DNS-01）" "cloudflare")"
+if [ "$NEEDS_TLS" = "true" ]; then
+  if ask_yn "是否使用域名（用于证书申请）" "y"; then
+    USE_DOMAIN="true"
+    DOMAIN="$(ask "域名" "example.com")"
+  else
+    USE_DOMAIN="false"
+    DOMAIN=""
+  fi
 
-  # Cloudflare 需要 API Token
-  if [ "$CERT_PROVIDER" = "cloudflare" ]; then
-    if [ -n "${CF_TOKEN:-}" ]; then
-      say "  检测到环境变量 CF_TOKEN，将使用它。"
-      CF_Token="$CF_TOKEN"
-    else
-      read -rsp "  Cloudflare API Token（Zone>DNS>Edit，输入不回显）: " CF_Token
-      say ""
-      [ -z "$CF_Token" ] && { warn "未提供 Token，稍后申请证书会失败。"; }
+  say "  加密协议（DoH/DoT/DoQ）需要 TLS 证书。"
+  say "  1) acme.sh 申请并自动续期（推荐，DNS-01 无需开放 80）"
+  say "  2) 使用已有证书（指定文件路径）"
+  CERT_CHOICE="$(ask "证书方式" "1")"
+
+  if [ "$CERT_CHOICE" = "2" ]; then
+    CERT_MODE="existing"
+    CERT_RENEW="false"
+    CERT_PATH="$(ask "证书（fullchain）路径" "/etc/dnsproxy/certs/fullchain.pem")"
+    KEY_PATH="$(ask "私钥路径" "/etc/dnsproxy/certs/privkey.pem")"
+    CERT_EMAIL=""
+    CERT_PROVIDER=""
+  else
+    CERT_MODE="acme"
+    CERT_RENEW="true"
+    CERT_PATH="${CERT_DIR}/fullchain.pem"
+    KEY_PATH="${CERT_DIR}/privkey.pem"
+    CERT_EMAIL="$(ask "注册邮箱（证书到期提醒）" "you@example.com")"
+    CERT_PROVIDER="$(ask "DNS API 提供商（acme DNS-01）" "cloudflare")"
+
+    # Cloudflare 需要 API Token
+    if [ "$CERT_PROVIDER" = "cloudflare" ]; then
+      if [ -n "${CF_TOKEN:-}" ]; then
+        say "  检测到环境变量 CF_TOKEN，将使用它。"
+        CF_Token="$CF_TOKEN"
+      else
+        read -rsp "  Cloudflare API Token（Zone>DNS>Edit，输入不回显）: " CF_Token
+        say ""
+        [ -z "$CF_Token" ] && { warn "未提供 Token，稍后申请证书会失败。"; }
+      fi
     fi
   fi
+else
+  # 仅明文 DNS，无需域名与证书。
+  USE_DOMAIN="false"
+  DOMAIN=""
+  CERT_MODE="existing"
+  CERT_RENEW="false"
+  CERT_PATH=""
+  KEY_PATH=""
+  CERT_EMAIL=""
+  CERT_PROVIDER=""
+  say "  仅开启明文 DNS，无需 TLS 证书，跳过域名与证书配置。"
 fi
 
 # --- 3. 探测参数 ---
@@ -288,7 +353,7 @@ done
 say ""
 info "【5/6】上游 DNS 服务商配置"
 say "  项目不内置任何上游端点，请在此添加你自己的 DNS 服务商。"
-say "  每个服务商可配置多种查询模式：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC"
+say "  每个服务商可配置多种查询模式：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS"
 
 DNS_BLOCK=""
 while :; do
@@ -298,15 +363,16 @@ while :; do
   DNS_BLOCK+="  ${pname}:"$'\n'
   while :; do
     say "    为 ${pname} 添加模式："
-    say "      1) DNS-over-HTTPS   2) DNS-over-TLS   3) DNS-over-QUIC   0) 完成"
+    say "      1) DNS-over-HTTPS   2) DNS-over-TLS   3) DNS-over-QUIC   4) Plain DNS   0) 完成"
     read -rp "    选择 [0]: " mchoice
     case "${mchoice:-0}" in
       1) mode="DNS-over-HTTPS" ;;
       2) mode="DNS-over-TLS" ;;
       3) mode="DNS-over-QUIC" ;;
+      4) mode="Plain DNS" ;;
       *) break ;;
     esac
-    read -rp "    ${mode} 地址（可不带前缀/端口，如 dns.example.com）: " maddr
+    read -rp "    ${mode} 地址（可不带前缀/端口，如 dns.example.com 或 1.1.1.1）: " maddr
     [ -z "$maddr" ] && continue
     maddr="$(normalize_upstream_addr "$mode" "$maddr")"
     say "      已规范化为: ${maddr}"
@@ -325,8 +391,21 @@ mkdir -p "$CONF_DIR" "$CERT_DIR"
 cat > "$CONF_FILE" <<EOF
 use_domain: ${USE_DOMAIN}
 domain: "${DOMAIN}"
-port: ${PORT}
-doh_path: "${DOH_PATH}"
+
+listeners:
+  doh:
+    enabled: ${DOH_ENABLED}
+    port: ${DOH_PORT}
+    path: "${DOH_PATH}"
+  dot:
+    enabled: ${DOT_ENABLED}
+    port: ${DOT_PORT}
+  doq:
+    enabled: ${DOQ_ENABLED}
+    port: ${DOQ_PORT}
+  plain_dns:
+    enabled: ${PLAIN_ENABLED}
+    port: ${PLAIN_PORT}
 
 ecs:
   mode: "${ECS_MODE}"
@@ -371,7 +450,7 @@ install -m 0755 "$BIN_SRC" "${INSTALL_DIR}/${SERVICE}"
 ok "已安装二进制: ${INSTALL_DIR}/${SERVICE}"
 
 # --- 8. 证书申请（acme 模式）---
-if [ "$CERT_MODE" = "acme" ]; then
+if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then
   say ""
   info "申请证书（acme.sh + DNS-01）..."
 
@@ -401,7 +480,7 @@ fi
 # --- 9. systemd 单元 + 启动 ---
 cat > "/etc/systemd/system/${SERVICE}.service" <<EOF
 [Unit]
-Description=dnsproxy-scheduler (DoH proxy with racing upstreams)
+Description=dnsproxy-scheduler (DNS proxy with racing upstreams)
 After=network-online.target
 Wants=network-online.target
 
@@ -423,9 +502,30 @@ ok "部署完成。"
 say ""
 say "  查看状态: systemctl status ${SERVICE}"
 say "  查看日志: journalctl -u ${SERVICE} -f"
-if [ "$USE_DOMAIN" = "true" ] && [ -n "$DOMAIN" ]; then
-  say "  验证:     curl -H 'accept: application/dns-message' \\"
-  say "              'https://${DOMAIN}:${PORT}${DOH_PATH}?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | xxd | head"
+
+# 按开启的协议给出对应验证命令与放行端口。
+firewall_ports=""
+if [ "$DOH_ENABLED" = "true" ]; then
+  if [ "$USE_DOMAIN" = "true" ] && [ -n "$DOMAIN" ]; then
+    say "  验证 DoH:  curl -H 'accept: application/dns-message' \\"
+    say "              'https://${DOMAIN}:${DOH_PORT}${DOH_PATH}?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | xxd | head"
+  fi
+  firewall_ports+="${DOH_PORT}/tcp "
 fi
-say ""
-say "  注意：甲骨文安全列表需放行 ${PORT}/TCP。"
+if [ "$DOT_ENABLED" = "true" ]; then
+  say "  验证 DoT:  kdig -d @${DOMAIN} +tls-ca +tls-host=${DOMAIN} example.com A"
+  firewall_ports+="${DOT_PORT}/tcp "
+fi
+if [ "$DOQ_ENABLED" = "true" ]; then
+  say "  验证 DoQ:  kdig -d @${DOMAIN} +quic example.com A"
+  firewall_ports+="${DOQ_PORT}/udp "
+fi
+if [ "$PLAIN_ENABLED" = "true" ]; then
+  say "  验证明文:  dig @${DOMAIN} example.com A"
+  firewall_ports+="${PLAIN_PORT}/udp ${PLAIN_PORT}/tcp "
+fi
+
+if [ -n "$firewall_ports" ]; then
+  say ""
+  say "  注意：甲骨文安全列表需放行：${firewall_ports}"
+fi

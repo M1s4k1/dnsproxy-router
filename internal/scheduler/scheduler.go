@@ -17,7 +17,7 @@ import (
 )
 
 // modeOrder 定义探测时模式的稳定遍历顺序，避免 map 无序导致日志抖动。
-var modeOrder = []string{"DNS-over-HTTPS", "DNS-over-TLS", "DNS-over-QUIC"}
+var modeOrder = []string{"DNS-over-HTTPS", "DNS-over-TLS", "DNS-over-QUIC", "Plain DNS"}
 
 // probeResult 是某条线路的单轮探测结果。
 type probeResult struct {

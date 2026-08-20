@@ -1,11 +1,14 @@
-// dnsproxy-scheduler 入口：对外只提供 DoH 的 DNS 代理，内部对多家上游做「动态择优 + 并发赛马」。
+// dnsproxy-scheduler 入口：对外提供 DoH/DoT/DoQ/明文 DNS 的 DNS 代理，
+// 内部对多家上游做「动态择优 + 并发赛马」。
 package main
 
 import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -59,18 +62,6 @@ func main() {
 		Timeout:   cfg.ProbeTimeout,
 	}
 
-	cert, err := tls.LoadX509KeyPair(cfg.Cert.CertPath, cfg.Cert.KeyPath)
-	if err != nil {
-		logger.Error("加载 TLS 证书失败", "err", err)
-		os.Exit(1)
-	}
-
-	ap, err := netip.ParseAddrPort(cfg.ListenAddr())
-	if err != nil {
-		logger.Error("解析监听地址失败", "addr", cfg.ListenAddr(), "err", err)
-		os.Exit(1)
-	}
-
 	sched := scheduler.New(cfg, logger, upstreamOpts)
 
 	// ECS 策略：off/override 在 handler 层改请求，pass 依赖库透传。
@@ -89,22 +80,55 @@ func main() {
 		os.Exit(1)
 	}
 
-	p, err := proxy.New(&proxy.Config{
+	ls := cfg.Listeners
+
+	proxyCfg := &proxy.Config{
 		Logger:                 logger,
 		RequestHandler:         handler.New(sched, logger, ecsPolicy),
 		UpstreamConfig:         placeholder,
 		UpstreamMode:           proxy.UpstreamModeParallel,
 		EnableEDNSClientSubnet: enableECS,
-		HTTPConfig: &proxy.HTTPConfig{
-			ListenAddresses: []netip.AddrPort{ap},
-			ServerHeader:    "dnsproxy-scheduler",
-			Routes:          []string{http.MethodGet + " " + cfg.DoHPath, http.MethodPost + " " + cfg.DoHPath},
-		},
-		TLSConfig: &tls.Config{
+	}
+
+	// 明文 DNS（UDP + TCP 同端口）。
+	if ls.PlainDNS.Enabled {
+		proxyCfg.UDPListenAddr = []*net.UDPAddr{{Port: ls.PlainDNS.Port}}
+		proxyCfg.TCPListenAddr = []*net.TCPAddr{{Port: ls.PlainDNS.Port}}
+	}
+
+	// TLS 监听（DoT / DoQ / DoH）共享同一证书。
+	if ls.NeedsTLS() {
+		cert, err := tls.LoadX509KeyPair(cfg.Cert.CertPath, cfg.Cert.KeyPath)
+		if err != nil {
+			logger.Error("加载 TLS 证书失败", "err", err)
+			os.Exit(1)
+		}
+		proxyCfg.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
-		},
-	})
+		}
+
+		if ls.DoT.Enabled {
+			proxyCfg.TLSListenAddr = []*net.TCPAddr{{Port: ls.DoT.Port}}
+		}
+		if ls.DoQ.Enabled {
+			proxyCfg.QUICListenAddr = []*net.UDPAddr{{Port: ls.DoQ.Port}}
+		}
+		if ls.DoH.Enabled {
+			ap, err := netip.ParseAddrPort(fmt.Sprintf("0.0.0.0:%d", ls.DoH.Port))
+			if err != nil {
+				logger.Error("解析 DoH 监听地址失败", "port", ls.DoH.Port, "err", err)
+				os.Exit(1)
+			}
+			proxyCfg.HTTPConfig = &proxy.HTTPConfig{
+				ListenAddresses: []netip.AddrPort{ap},
+				ServerHeader:    "dnsproxy-scheduler",
+				Routes:          []string{http.MethodGet + " " + ls.DoH.Path, http.MethodPost + " " + ls.DoH.Path},
+			}
+		}
+	}
+
+	p, err := proxy.New(proxyCfg)
 	if err != nil {
 		logger.Error("创建 proxy 失败", "err", err)
 		os.Exit(1)
@@ -123,7 +147,9 @@ func main() {
 		}
 	}()
 
-	logger.Info("dnsproxy-scheduler 已启动", "listen", cfg.ListenAddr(), "probe_interval", cfg.ProbeInterval)
+	logger.Info("dnsproxy-scheduler 已启动",
+		"doh", ls.DoH.Enabled, "dot", ls.DoT.Enabled, "doq", ls.DoQ.Enabled,
+		"plain_dns", ls.PlainDNS.Enabled, "probe_interval", cfg.ProbeInterval)
 
 	<-ctx.Done()
 	logger.Info("收到退出信号，正在关闭...")
