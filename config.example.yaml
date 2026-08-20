@@ -62,7 +62,7 @@ bootstrap_cache_ttl: 5s
 
 # 上游域名 → IP 静态映射：命中即直接用给定 IP，不再走引导 DNS。
 # 键为上游主机名（可带或不带尾部点），值为 IP 列表（IPv4/IPv6 均可）。
-# 同时配 IPv4/IPv6 时，由 prefer_ipv6 决定优先用哪族，连接失败自动回退另一族。
+# 同时配 IPv4/IPv6 时，由 ip_priority 决定优先用哪族，连接失败自动回退另一族。
 hosts: {}
 #  example.com:
 #    - "1.2.3.4"

@@ -163,7 +163,6 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		selAddr[name] = b.addr
 		selUp[b.addr] = b.upstream
 		members = append(members, racingMember{
-			name:     name,
 			weight:   s.cfg.Weight(name),
 			upstream: b.upstream,
 		})
@@ -189,7 +188,7 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		if *s.cfg.CacheEnabled {
 			shared := cache.New(cache.Config{
 				MaxBytes: int64(s.cfg.CacheSizeBytes),
-				TTL:      s.cfg.CacheTTL,
+				TTL:      *s.cfg.CacheTTL,
 				Eviction: cache.Policy(s.cfg.CacheEviction),
 			})
 			finalUp = s.wrapCached(racing, shared)
@@ -279,11 +278,13 @@ func closeFresh(results []probeResult, keep upstream.Upstream) {
 
 // probeMode 连续探测 ProbeCount 次，返回中位数 RTT；全部失败返回 ok=false。
 func (s *Scheduler) probeMode(_ context.Context, u upstream.Upstream) (rtt time.Duration, ok bool) {
+	// 各 provider/mode 的探测并发进行，Exchange 可能改写请求，故每 goroutine 用副本。
+	msg := s.probeMsg.Copy()
 	var rtts []time.Duration
 
 	for i := 0; i < s.cfg.ProbeCount; i++ {
 		start := time.Now()
-		_, err := u.Exchange(s.probeMsg)
+		_, err := u.Exchange(msg)
 		elapsed := time.Since(start)
 		if err != nil {
 			continue
@@ -335,12 +336,7 @@ func pickBest(results []probeResult) *probeResult {
 	return best
 }
 
-// wrapCached 用共享缓存包装上游。shared 为 nil 表示缓存已关闭，直接返回原上游。
-// 返回的 upstream.Upstream 会先查缓存，命中则直接返回、未命中才真正转发并回填。
-//
-// 之所以在「上游层」而非 handler 层做缓存：库对 custom upstream 的每个 upstream
-// 都会调用 Exchange，缓存包装恰好在每次转发前拦截，天然复用了库的去重、SERVFAIL
-// 兜底与响应管线，无需在 handler 里重写整个解析流程。
+// wrapCached 用共享缓存包装上游；shared 为 nil 表示缓存已关闭，直接返回原上游。
 func (s *Scheduler) wrapCached(u upstream.Upstream, shared *cache.Cache) upstream.Upstream {
 	if shared == nil {
 		return u

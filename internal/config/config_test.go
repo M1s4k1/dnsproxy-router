@@ -146,11 +146,37 @@ dns:
 	if err != nil {
 		t.Fatalf("LoadConfig 失败: %v", err)
 	}
-	if c.CacheTTL.String() != "5m0s" {
-		t.Fatalf("CacheTTL 解析错误: %q", c.CacheTTL)
+	if c.CacheTTL == nil || c.CacheTTL.String() != "5m0s" {
+		t.Fatalf("CacheTTL 解析错误: %v", c.CacheTTL)
 	}
 	if c.CacheEviction != "lfu" {
 		t.Fatalf("CacheEviction 解析错误: %q", c.CacheEviction)
+	}
+}
+
+func TestLoadConfigCacheTTLZero(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+cache_ttl: 0s
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.CacheTTL == nil || c.CacheTTL.String() != "0s" {
+		t.Fatalf("cache_ttl: 0s 应被保留（跟随记录 TTL），得到 %v", c.CacheTTL)
 	}
 }
 

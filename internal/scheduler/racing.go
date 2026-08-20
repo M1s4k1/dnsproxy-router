@@ -10,19 +10,16 @@ import (
 	"dnsproxy-scheduler/internal/cache"
 )
 
-// racingMember 是参与赛马的一个上游及其元信息。
+// racingMember 是参与赛马的一个上游及其权重。
 type racingMember struct {
-	name     string
 	weight   int
 	upstream upstream.Upstream
 }
 
-// racingUpstream 是一个聚合上游：把「多家当前最优线路」收拢为一个 upstream，
-// 交给库的单元素 exchange 路径（UpstreamModeParallel 对单元素直接调 Exchange）。
-// 由它内部并发查询所有子上游，按模式选出返回结果：
-//   - fastest：谁先成功返回用谁（等价于库的并发赛马）；
-//   - weighted：第一个成功响应后的窗口期内收集所有成功响应，取权重最高者，
-//     权重相同时取响应最快者。
+// racingUpstream 把「多家当前最优线路」收拢为一个上游，交给库的单元素 exchange
+// 路径（UpstreamModeParallel 对单元素直接调 Exchange）。由它内部并发查询所有子上游：
+// fastest 谁先成功返回用谁；weighted 在首个成功响应后的窗口期内收集成功响应，
+// 取权重最高者，权重相同时取响应最快者。
 type racingUpstream struct {
 	members  []racingMember
 	window   time.Duration
@@ -31,22 +28,13 @@ type racingUpstream struct {
 
 // racingResult 是单个上游的并发查询结果。
 type racingResult struct {
-	weight   int
-	upstream upstream.Upstream
-	resp     *dns.Msg
-	err      error
-	elapsed  time.Duration
+	weight  int
+	resp    *dns.Msg
+	err     error
+	elapsed time.Duration
 }
 
-// newRacing 构造聚合上游。weighted 为 false 表示 fastest 模式（window 忽略）。
-// members 按权重从高到低、权重相同时按名字字典序预排序，保证选择稳定。
 func newRacing(members []racingMember, weighted bool, window time.Duration) *racingUpstream {
-	sort.Slice(members, func(i, j int) bool {
-		if members[i].weight != members[j].weight {
-			return members[i].weight > members[j].weight
-		}
-		return members[i].name < members[j].name
-	})
 	return &racingUpstream{members: members, weighted: weighted, window: window}
 }
 
@@ -91,8 +79,8 @@ func (r *racingUpstream) exchangeFastest(req *dns.Msg) (*dns.Msg, error) {
 	return nil, upstream.ErrNoReply
 }
 
-// exchangeWeighted 第一个成功响应后等待窗口期，收集窗口内所有成功响应，
-// 取权重最高者；权重相同时取响应最快者。
+// exchangeWeighted 在首个成功响应后开启窗口期，收集窗口内的所有成功响应，
+// 窗口一到即返回，不再等待尚未返回的上游。
 func (r *racingUpstream) exchangeWeighted(req *dns.Msg) (*dns.Msg, error) {
 	resCh := make(chan racingResult, len(r.members))
 	for _, m := range r.members {
@@ -103,32 +91,43 @@ func (r *racingUpstream) exchangeWeighted(req *dns.Msg) (*dns.Msg, error) {
 		}(m)
 	}
 
-	var (
-		windowEnd time.Time
-		windowSet bool
-		cands     []racingResult
-	)
+	var cands []racingResult
+	var timer *time.Timer
+	remaining := len(r.members)
 
-	for range r.members {
-		res := <-resCh
-		if res.err != nil || res.resp == nil {
+	for remaining > 0 {
+		if timer == nil {
+			res := <-resCh
+			remaining--
+			if res.err == nil && res.resp != nil {
+				cands = append(cands, res)
+				timer = time.NewTimer(r.window)
+			}
 			continue
 		}
-		if !windowSet {
-			windowEnd = time.Now().Add(r.window)
-			windowSet = true
-			cands = append(cands, res)
-			continue
-		}
-		if time.Now().Before(windowEnd) {
-			cands = append(cands, res)
+
+		select {
+		case res := <-resCh:
+			remaining--
+			if res.err == nil && res.resp != nil {
+				cands = append(cands, res)
+			}
+		case <-timer.C:
+			return pickWeighted(cands)
 		}
 	}
 
+	if timer != nil {
+		timer.Stop()
+	}
+	return pickWeighted(cands)
+}
+
+// pickWeighted 从候选中取权重最高者，权重相同时取响应最快者；候选为空返回 ErrNoReply。
+func pickWeighted(cands []racingResult) (*dns.Msg, error) {
 	if len(cands) == 0 {
 		return nil, upstream.ErrNoReply
 	}
-
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].weight != cands[j].weight {
 			return cands[i].weight > cands[j].weight
@@ -154,8 +153,7 @@ func (r *racingUpstream) Close() error {
 
 var _ upstream.Upstream = (*racingUpstream)(nil)
 
-// cachingUpstream 用共享缓存包装单个上游，实现 upstream.Upstream 接口。
-// 所有上游共享同一个 cache 实例，保证同一查询跨上游命中。
+// cachingUpstream 在聚合上游外层加一层响应缓存。
 type cachingUpstream struct {
 	upstream upstream.Upstream
 	cache    *cache.Cache
@@ -176,10 +174,7 @@ func (c *cachingUpstream) Exchange(req *dns.Msg) (*dns.Msg, error) {
 	return resp, nil
 }
 
-// Address 透传底层上游地址。
 func (c *cachingUpstream) Address() string { return c.upstream.Address() }
-
-// Close 透传底层上游关闭。
-func (c *cachingUpstream) Close() error { return c.upstream.Close() }
+func (c *cachingUpstream) Close() error    { return c.upstream.Close() }
 
 var _ upstream.Upstream = (*cachingUpstream)(nil)
