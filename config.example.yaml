@@ -77,6 +77,21 @@ ip_priority: ipv4
 # ip_priority: latency 时的延迟探测周期
 ip_latency_interval: 15m
 
+# 上游查询结果的赛马模式：
+#   fastest  并发查询，谁先成功返回用谁
+#   weighted 加权 + 延时窗口：首个响应后窗口期内收集所有成功响应，
+#            取权重最高者；权重相同时取响应最快者
+upstream_mode: fastest
+
+# weighted 模式下各服务商的权重（1-100），键为 dns 里的服务商名；
+# 未列出的服务商默认权重 1。fastest 模式下忽略本段。
+upstream_weights: {}
+#  cf: 8
+#  adguard: 20
+
+# weighted 模式的延时窗口（首个响应后等待多久，超时响应抛弃）
+race_window: 50ms
+
 # 上游服务商 → 查询模式 → 地址
 # 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
 # 地址格式：https://host/dns-query | tls://host:853 | quic://host:853 | udp://host:53

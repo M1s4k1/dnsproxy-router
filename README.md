@@ -134,6 +134,9 @@ dig @你的域名 example.com A
 | `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
 | `ip_priority` | 双栈时的地址族优先级：`ipv4` \| `ipv6` \| `latency` | `ipv4` |
 | `ip_latency_interval` | `latency` 模式的延迟探测周期 | `15m` |
+| `upstream_mode` | 查询结果赛马模式：`fastest` \| `weighted` | `fastest` |
+| `upstream_weights` | `weighted` 模式下各服务商权重（1-100），键为服务商名 | 空（默认 1） |
+| `race_window` | `weighted` 模式的延时窗口 | `50ms` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
 
 ### `cert.provider`：DNS API 提供商（DNS-01）
@@ -233,6 +236,37 @@ ip_latency_interval: 15m
 - `latency` 模式下，程序每隔 `ip_latency_interval`（默认 `15m`）解析每个上游域名、分别测 IPv4/IPv6 的连接延迟，比较全局平均后切换优选族；两次探测之间使用上次选定的族。
 - 探测目标来自 `dns` 各模式地址的主机名（DoH→443、DoT/DoQ→853、明文→53），`hosts` 里额外出现的域名按 443 探测。
 - `ipv4` / `ipv6` 模式是静态偏好，`ip_latency_interval` 不生效。
+
+### `upstream_mode` 字段：查询结果赛马模式
+
+每次查询都会向各家「当前最优线路」并发发出，`upstream_mode` 决定从返回结果里怎么选：
+
+| 值 | 行为 |
+| --- | --- |
+| `fastest` | 并发查询，谁先成功返回就用谁（默认，等价于原来的并发赛马） |
+| `weighted` | 加权 + 延时窗口：见下 |
+
+**`weighted`（加权 + 延时窗口）**：
+
+1. 先给每家服务商设权重（`upstream_weights`，1-100，越大越优先）。
+2. 并发查询各家后，从**第一个成功响应**起，等待一个 `race_window`（默认 `50ms`）的延时窗口。
+3. 窗口期内到达的成功响应都视为有效，超时的响应抛弃。
+4. 在有效响应中取**权重最高**的那家；若权重相同，取**响应最快**的那家。
+
+```yaml
+upstream_mode: weighted
+upstream_weights:
+  cf: 8
+  next: 1
+  adguard: 20
+  google: 5
+race_window: 50ms
+```
+
+- 例如上面例子：`cf` 最快返回，其后 50ms 内 `next` 和 `adguard` 也返回了，则这三个都有效；最终返回权重最高的 `adguard`（20）。
+- 未在 `upstream_weights` 中列出的服务商默认权重 1（最低）。
+- `race_window` 越大，越偏向「等权重最高的那家」；越小越接近「最快返回」。设 `0` 实际就是最快返回。
+- `fastest` 模式下 `upstream_weights` 与 `race_window` 均被忽略。
 
 ### `dns` 字段：服务商 → 模式 → 地址
 
