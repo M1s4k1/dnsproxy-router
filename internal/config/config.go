@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,9 +77,9 @@ type Config struct {
 	// Cert: 证书配置。
 	Cert CertConfig `yaml:"cert"`
 	// ProbeInterval: 探测周期。
-	ProbeInterval time.Duration `yaml:"probe_interval"`
+	ProbeInterval Duration `yaml:"probe_interval"`
 	// ProbeTimeout: 单次探测超时。
-	ProbeTimeout time.Duration `yaml:"probe_timeout"`
+	ProbeTimeout Duration `yaml:"probe_timeout"`
 	// ProbeCount: 每模式每轮探测次数（取中位数）。
 	ProbeCount int `yaml:"probe_count"`
 	// ProbeDomain: 探测用域名。
@@ -88,21 +89,24 @@ type Config struct {
 	// CacheSizeBytes: 响应缓存大小（字节），仅在 CacheEnabled 时生效。
 	CacheSizeBytes int `yaml:"cache_size_bytes"`
 	// CacheTTL: 缓存固定过期时间（如 30m）。nil 表示使用默认 30m；0 表示跟随记录自身的 TTL。
-	CacheTTL *time.Duration `yaml:"cache_ttl"`
+	CacheTTL *Duration `yaml:"cache_ttl"`
 	// CacheEviction: 缓存逐出策略：fifo / lru / lfu。
 	CacheEviction string `yaml:"cache_eviction"`
 	// Bootstrap: 解析上游主机名用的引导 DNS（明文）。
 	Bootstrap []string `yaml:"bootstrap"`
 	// BootstrapCacheTTL: 引导解析结果的缓存时长（0 表示不缓存）。
-	BootstrapCacheTTL time.Duration `yaml:"bootstrap_cache_ttl"`
+	BootstrapCacheTTL Duration `yaml:"bootstrap_cache_ttl"`
 	// Hosts: 上游域名 → IP 静态映射，命中即直接用给定 IP，不再走引导 DNS。
 	// 键为域名（可带点），值为 IP 列表（IPv4/IPv6 均可）。
 	Hosts map[string][]string `yaml:"hosts"`
 	// IPPriority: 上游域名同时有 IPv4/IPv6 时的地址族优先级：
 	// "ipv4"（IPv4 优先）/ "ipv6"（IPv6 优先）/ "latency"（按延迟动态选族）。
 	IPPriority string `yaml:"ip_priority"`
+	// ProviderIPPriority: 每个服务商覆盖全局 ip_priority 的优先级，键为 dns 的服务商名。
+	// 未列出的服务商回退到 IPPriority。
+	ProviderIPPriority map[string]string `yaml:"provider_ip_priority"`
 	// IPLatencyInterval: ip_priority=latency 时，重新探测各地址族延迟的周期。
-	IPLatencyInterval time.Duration `yaml:"ip_latency_interval"`
+	IPLatencyInterval Duration `yaml:"ip_latency_interval"`
 	// UpstreamMode: 上游查询结果的赛马模式：
 	// "fastest"（并发查询，谁先成功返回用谁）/ "weighted"（加权 + 延时窗口）。
 	UpstreamMode string `yaml:"upstream_mode"`
@@ -111,7 +115,7 @@ type Config struct {
 	UpstreamWeights map[string]int `yaml:"upstream_weights"`
 	// RaceWindow: weighted 模式的延时窗口（如 50ms）。第一个成功响应后，
 	// 窗口期内到达的成功响应均纳入候选，超时抛弃。
-	RaceWindow time.Duration `yaml:"race_window"`
+	RaceWindow Duration `yaml:"race_window"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
 	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
@@ -123,8 +127,65 @@ func boolPtr(b bool) *bool {
 }
 
 // durationPtr 返回指向 d 的指针，用于构造可选 duration 字段的默认值。
-func durationPtr(d time.Duration) *time.Duration {
-	return &d
+func durationPtr(d time.Duration) *Duration {
+	v := Duration(d)
+	return &v
+}
+
+// dayRE 匹配「天数 + 可选剩余标准时长」。剩余部分（若存在）必须以数字开头，
+// 排除 2d-3h、2d+3h 这类负号/符号混入；其合法性与溢出由 time.ParseDuration 把关。
+var dayRE = regexp.MustCompile(`^([0-9]+)d([0-9].*)?$`)
+
+// Duration 是支持「天」单位的时长类型。Go 原生 time.ParseDuration 最大到小时 h，
+// 不支持 d（天）；此处自定义解析，1d = 24h。底层仍是 time.Duration，比较/算术语义不变。
+type Duration time.Duration
+
+// UnmarshalYAML 实现 yaml.Unmarshaler，使配置里的时长支持 d 天单位。
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("时长必须为字符串")
+	}
+	v, err := ParseDuration(value.Value)
+	if err != nil {
+		return err
+	}
+	*d = Duration(v)
+	return nil
+}
+
+// String 返回 time.Duration 风格的可读表示（如 5m0s、1h0m0s）。
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// ParseDuration 解析时长字符串：在 time.ParseDuration 基础上额外支持 d（天）。
+// 例如 1d、2d12h、3d30m；纯标准时长（ns/us/ms/s/m/h）直接交给 time.ParseDuration。
+func ParseDuration(s string) (time.Duration, error) {
+	if v, err := time.ParseDuration(s); err == nil {
+		return v, nil
+	}
+	m := dayRE.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("非法时长 %q：需为 数字+单位（ns/us/ms/s/m/h/d），如 15m、3s、1h、1d", s)
+	}
+	days, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("非法时长 %q：天数过大", s)
+	}
+	// 溢出保护：天 * 24h 可能超出 time.Duration 范围。
+	dayDur := time.Duration(days) * 24 * time.Hour
+	if dayDur/24/time.Hour != time.Duration(days) {
+		return 0, fmt.Errorf("非法时长 %q：天数过大", s)
+	}
+	if m[2] == "" {
+		return dayDur, nil
+	}
+	rest, err := time.ParseDuration(m[2])
+	if err != nil {
+		return 0, fmt.Errorf("非法时长 %q：%v", s, err)
+	}
+	if dayDur+rest < 0 {
+		return 0, fmt.Errorf("非法时长 %q：结果不能为负", s)
+	}
+	return dayDur + rest, nil
 }
 
 // validateDoHPath 校验 DoH 请求路径：必须以 / 开头、不含查询串/片段、无非法转义。
@@ -164,8 +225,8 @@ func DefaultConfig() Config {
 			Email:    "you@example.com",
 			Provider: "cloudflare",
 		},
-		ProbeInterval:  15 * time.Minute,
-		ProbeTimeout:   3 * time.Second,
+		ProbeInterval:  Duration(15 * time.Minute),
+		ProbeTimeout:   Duration(3 * time.Second),
 		ProbeCount:     3,
 		ProbeDomain:    "example.com.",
 		CacheEnabled:   boolPtr(true),
@@ -177,12 +238,13 @@ func DefaultConfig() Config {
 		// 或 interactive-setup.sh 自行填写。
 		Hosts: map[string][]string{},
 		// IPPriority 默认 ipv4（IPv4 优先）。
-		IPPriority:        "ipv4",
-		IPLatencyInterval: 15 * time.Minute,
+		IPPriority:         "ipv4",
+		ProviderIPPriority: map[string]string{},
+		IPLatencyInterval:  Duration(15 * time.Minute),
 		// UpstreamMode 默认 fastest（并发赛马，谁先成功返回用谁）。
 		UpstreamMode:    "fastest",
 		UpstreamWeights: map[string]int{},
-		RaceWindow:      50 * time.Millisecond,
+		RaceWindow:      Duration(50 * time.Millisecond),
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
 		// interactive-setup.sh 自行填写（空值会被 LoadConfig 校验拒绝）。
@@ -275,10 +337,10 @@ func (c *Config) normalize() error {
 		}
 	}
 	if c.ProbeInterval <= 0 {
-		c.ProbeInterval = 15 * time.Minute
+		c.ProbeInterval = Duration(15 * time.Minute)
 	}
 	if c.ProbeTimeout <= 0 {
-		c.ProbeTimeout = 3 * time.Second
+		c.ProbeTimeout = Duration(3 * time.Second)
 	}
 	if c.ProbeCount <= 0 {
 		c.ProbeCount = 3
@@ -317,8 +379,18 @@ func (c *Config) normalize() error {
 	default:
 		return fmt.Errorf("ip_priority 必须为 ipv4/ipv6/latency，当前为 %q", c.IPPriority)
 	}
+	for name, prio := range c.ProviderIPPriority {
+		if name == "" {
+			return fmt.Errorf("provider_ip_priority 键（服务商名）不能为空")
+		}
+		switch prio {
+		case "ipv4", "ipv6", "latency":
+		default:
+			return fmt.Errorf("服务商 %s 的 provider_ip_priority 必须为 ipv4/ipv6/latency，当前为 %q", name, prio)
+		}
+	}
 	if c.IPLatencyInterval <= 0 {
-		c.IPLatencyInterval = 15 * time.Minute
+		c.IPLatencyInterval = Duration(15 * time.Minute)
 	}
 	if c.UpstreamMode == "" {
 		c.UpstreamMode = "fastest"
@@ -329,7 +401,7 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("upstream_mode 必须为 fastest/weighted，当前为 %q", c.UpstreamMode)
 	}
 	if c.RaceWindow <= 0 {
-		c.RaceWindow = 50 * time.Millisecond
+		c.RaceWindow = Duration(50 * time.Millisecond)
 	}
 	for name, w := range c.UpstreamWeights {
 		if name == "" {
@@ -379,6 +451,15 @@ func (c *Config) validateHosts() error {
 	return nil
 }
 
+// IPPriorityFor 返回指定服务商的地址族优先级：命中 ProviderIPPriority 时
+// 用之覆盖，否则回退全局 IPPriority。
+func (c *Config) IPPriorityFor(provider string) string {
+	if p, ok := c.ProviderIPPriority[provider]; ok && p != "" {
+		return p
+	}
+	return c.IPPriority
+}
+
 // UpstreamTarget 是一个「按延迟选族」的探测目标：主机名 + 端口。
 type UpstreamTarget struct {
 	Host string
@@ -402,6 +483,25 @@ func (c *Config) UpstreamTargets() []UpstreamTarget {
 		key := strings.ToLower(name)
 		if _, ok := seen[key]; !ok {
 			seen[key] = UpstreamTarget{Host: key, Port: 443}
+		}
+	}
+
+	targets := make([]UpstreamTarget, 0, len(seen))
+	for _, t := range seen {
+		targets = append(targets, t)
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Host < targets[j].Host })
+	return targets
+}
+
+// UpstreamTargetsFor 返回单个服务商的「按延迟选族」探测目标（去重）。
+// 与 UpstreamTargets 不同：只扫该服务商自己的模式地址，不加 hosts-only 兜底——
+// hosts 条目是全局的、不归属任何服务商，无法分配 per-provider 优先级。
+func (c *Config) UpstreamTargetsFor(provider string) []UpstreamTarget {
+	seen := make(map[string]UpstreamTarget)
+	for _, addr := range c.DNS[provider] {
+		if t, ok := targetFromAddr(addr); ok {
+			seen[strings.ToLower(t.Host)] = t
 		}
 	}
 

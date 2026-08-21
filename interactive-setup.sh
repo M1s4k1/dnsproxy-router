@@ -87,17 +87,19 @@ ask_int() {
   done
 }
 
-# ask_duration <提示> <默认值> -> 校验 Go time.Duration（数字+单位），非法重问
+# ask_duration <提示> <默认值> -> 校验时长（数字+单位），非法重问
+# 支持 ns/us/ms/s/m/h（Go 原生）与 d（天，1d=24h）；d 后可为空或多段剩余时长，
+# 如 2d、2d12h、2d12h30m。最终合法性仍由 Go 侧 time.ParseDuration 把关。
 ask_duration() {
   local prompt="$1" default="$2" input
   while :; do
     read -rp "$(printf '%s [%s]: ' "$prompt" "$default")" input
     input="${input:-$default}"
-    if [[ "$input" =~ ^[0-9]+(ns|us|ms|s|m|h)$ ]]; then
+    if [[ "$input" =~ ^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h)$ ]] || [[ "$input" =~ ^[0-9]+d([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))*$ ]]; then
       printf '%s' "$input"
       return 0
     fi
-    warn_err "  非法时长「${input}」：需为 数字+单位（ns/us/ms/s/m/h），如 15m、3s、1h"
+    warn_err "  非法时长「${input}」：需为 数字+单位（ns/us/ms/s/m/h/d），如 15m、3s、1h、2d、2d12h"
   done
 }
 
@@ -604,7 +606,10 @@ done
 # 「上游域名 → IP 静态映射」已移至第 5 步：为每个加密 DNS 域名询问是否固定解析。
 HOSTS_BLOCK=""
 HOSTS_COUNT=0
-HOSTS_DUALSTACK=0
+
+# 每个服务商的地址族优先级（provider_ip_priority）；IP_LATENCY_INTERVAL 只问一次。
+PROVIDER_PRIORITY_BLOCK=""
+IP_LATENCY_INTERVAL=""
 
 # --- 5. 上游 DNS（循环添加）---
 say ""
@@ -657,13 +662,27 @@ while :; do
                 *)   has_v4=1 ;;
               esac
             done
-            [ "$has_v4" -eq 1 ] && [ "$has_v6" -eq 1 ] && HOSTS_DUALSTACK=1
             HOSTS_COUNT=$((HOSTS_COUNT + 1))
           fi
         fi
       fi
     fi
   done
+
+  # 每设完一个服务商，立即询问它的地址族优先级（provider_ip_priority）。
+  say "    地址族优先级（${pname} 域名双栈时优先用哪族）："
+  say "      1) IPv4 优先   2) IPv6 优先   3) 按延迟优先"
+  case "$(ask "    ${pname} 优先级（1/2/3）" "1")" in
+    2) pp="ipv6" ;;
+    3)
+      pp="latency"
+      if [ -z "$IP_LATENCY_INTERVAL" ]; then
+        IP_LATENCY_INTERVAL="$(ask_duration "    延迟探测周期（如 15m/5m）" "15m")"
+      fi
+      ;;
+    *) pp="ipv4" ;;
+  esac
+  PROVIDER_PRIORITY_BLOCK+="  ${pname}: ${pp}"$'\n'
 done
 
 [ -z "$DNS_BLOCK" ] && { warn "未配置任何上游，退出。"; exit 1; }
@@ -701,37 +720,10 @@ case "$(ask "选择赛马模式（1/2）" "1")" in
     ;;
 esac
 
-# 地址族优先级：当上游域名存在 IPv4/IPv6 双栈时，让用户选择优先级。
-# 触发条件有二：① hosts 映射中任一个域名同时配了 v4+v6；② 用引导 DNS 解析时
-# 用户确认上游 DNS 支持双栈。
+# 地址族优先级改为 per-provider：每个服务商在其配置结束后已单独询问。
+# 全局 ip_priority 仅作兜底默认（未在 provider_ip_priority 中列出的服务商）。
 IP_PRIORITY="ipv4"
-IP_LATENCY_INTERVAL="15m"
-if [ "$HOSTS_DUALSTACK" -eq 1 ]; then
-  DUALSTACK="true"
-else
-  # 未通过 hosts 固定双栈，则询问引导 DNS 解析的上游是否支持双栈。
-  if ask_yn "  上游 DNS 域名是否支持双栈（同时解析出 IPv4 与 IPv6）" "n"; then
-    DUALSTACK="true"
-  else
-    DUALSTACK="false"
-  fi
-fi
-
-if [ "$DUALSTACK" = "true" ]; then
-  say ""
-  say "  上游域名存在 IPv4/IPv6 双栈，请选择地址族优先级："
-  say "    1) IPv4 优先（v6 作连接失败回退）"
-  say "    2) IPv6 优先（v4 作连接失败回退）"
-  say "    3) 按延迟优先（周期探测两族延迟，选延迟低者）"
-  case "$(ask "  选择优先级（1/2/3）" "1")" in
-    2) IP_PRIORITY="ipv6" ;;
-    3)
-      IP_PRIORITY="latency"
-      IP_LATENCY_INTERVAL="$(ask_duration "  延迟探测周期（如 15m/5m）" "15m")"
-      ;;
-    *) IP_PRIORITY="ipv4" ;;
-  esac
-fi
+[ -z "$IP_LATENCY_INTERVAL" ] && IP_LATENCY_INTERVAL="15m"
 
 # --- 6. 生成 config.yaml ---
 say ""
@@ -786,7 +778,8 @@ bootstrap_cache_ttl: ${BOOTSTRAP_CACHE_TTL}
 
 ${HOSTS_YAML}ip_priority: ${IP_PRIORITY}
 ip_latency_interval: ${IP_LATENCY_INTERVAL}
-
+provider_ip_priority:
+${PROVIDER_PRIORITY_BLOCK}
 upstream_mode: ${UPSTREAM_MODE}
 ${WEIGHTS_YAML}race_window: ${RACE_WINDOW}
 

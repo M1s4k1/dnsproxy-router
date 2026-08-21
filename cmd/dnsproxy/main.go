@@ -19,7 +19,6 @@ import (
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 
-	"dnsproxy-router/internal/afp"
 	bootstrapcache "dnsproxy-router/internal/bootstrap"
 	"dnsproxy-router/internal/config"
 	"dnsproxy-router/internal/ecs"
@@ -41,7 +40,7 @@ func main() {
 	}
 
 	// bootstrap：用明文 DNS 解析上游主机名（DoH/DoT/DoQ 的 hostname）。
-	bootstrap, err := proxy.ParseUpstreamsConfig(cfg.Bootstrap, &upstream.Options{Timeout: cfg.ProbeTimeout})
+	bootstrap, err := proxy.ParseUpstreamsConfig(cfg.Bootstrap, &upstream.Options{Timeout: time.Duration(cfg.ProbeTimeout)})
 	if err != nil {
 		logger.Error("解析 bootstrap 失败", "err", err)
 		os.Exit(1)
@@ -55,7 +54,7 @@ func main() {
 	// 若配置了 bootstrap_cache_ttl > 0，则给引导解析加一层固定 TTL 缓存。
 	var bootstrapResolver upstream.Resolver = bootstrapResolvers
 	if cfg.BootstrapCacheTTL > 0 {
-		bootstrapResolver = bootstrapcache.New(bootstrapResolvers, cfg.BootstrapCacheTTL)
+		bootstrapResolver = bootstrapcache.New(bootstrapResolvers, time.Duration(cfg.BootstrapCacheTTL))
 	}
 
 	// 域名 → IP 静态映射：命中即直接用给定 IP，未命中回退引导 DNS。
@@ -71,28 +70,16 @@ func main() {
 		bootstrapResolver = bootstrapcache.NewHostsResolver(hosts, bootstrapResolver)
 	}
 
-	// 地址族优先级：ipv4/ipv6 交给库的 PreferIPv6 排序；latency 用周期探测器
-	// 动态选族，由 Selector 在解析层只返回优选族地址。
-	preferIPv6 := cfg.IPPriority == "ipv6"
-	var prober *afp.Prober
-	if cfg.IPPriority == "latency" {
-		targets := make([]afp.Target, 0, len(cfg.UpstreamTargets()))
-		for _, t := range cfg.UpstreamTargets() {
-			targets = append(targets, afp.Target{Host: t.Host, Port: t.Port})
-		}
-		prober = afp.NewProber(logger, bootstrapResolver, targets, cfg.IPLatencyInterval)
-		// latency 模式绕开库的静态排序，这里固定 IPv4 顺序，实际族由 Selector 决定。
-		preferIPv6 = false
-		bootstrapResolver = afp.NewSelector(bootstrapResolver, afp.IPv4, prober)
-	}
-
-	upstreamOpts := &upstream.Options{
+	// 基础上游选项：Bootstrap 为共享引导解析链（明文 DNS → 缓存 → hosts），
+	// PreferIPv6 固定 false——per-provider 的优先级由 scheduler 按
+	// provider_ip_priority 各自 Clone 覆盖，这里只提供兜底。
+	baseOpts := &upstream.Options{
 		Bootstrap:  bootstrapResolver,
-		Timeout:    cfg.ProbeTimeout,
-		PreferIPv6: preferIPv6,
+		Timeout:    time.Duration(cfg.ProbeTimeout),
+		PreferIPv6: false,
 	}
 
-	sched := scheduler.New(cfg, logger, upstreamOpts)
+	sched := scheduler.New(cfg, logger, baseOpts)
 
 	// ECS 策略：off/override 在 handler 层改请求，pass 依赖库透传。
 	ecsPolicy, err := ecs.New(cfg.ECS.Mode, cfg.ECS.Address)
@@ -104,7 +91,7 @@ func main() {
 	enableECS := cfg.ECS.Mode == "pass"
 
 	// 占位上游：实际转发走 Handler 注入的 CustomUpstreamConfig，此配置仅在选路未就绪时回退。
-	placeholder, err := proxy.ParseUpstreamsConfig([]string{"tls://1.1.1.1:853"}, upstreamOpts)
+	placeholder, err := proxy.ParseUpstreamsConfig([]string{"tls://1.1.1.1:853"}, baseOpts)
 	if err != nil {
 		logger.Error("解析占位上游失败", "err", err)
 		os.Exit(1)
@@ -167,13 +154,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 启动调度循环（首轮立即探测）。
+	// 启动调度循环（首轮立即探测；per-provider 的延迟探测器由 scheduler 内部管理）。
 	go sched.Start(ctx)
-
-	// 启动地址族延迟探测（仅 latency 模式非 nil）。
-	if prober != nil {
-		go prober.Start(ctx)
-	}
 
 	go func() {
 		if err := p.Start(ctx); err != nil {
