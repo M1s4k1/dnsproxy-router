@@ -807,6 +807,24 @@ if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then
   fi
   ACME="${HOME}/.acme.sh/acme.sh"
 
+  # 同步账户邮箱：acme.sh 账户是「同一 HOME、同一 CA 下所有域名共享」的，
+  # 邮箱只影响证书到期提醒、不影响签发与续期。若账户已存在（重跑脚本），
+  # 上面的安装分支会被跳过，旧邮箱（可能仍是占位符 you@example.com）不会
+  # 自动更新，导致 Let's Encrypt 以 invalidContact 拒绝。这里仅当现有邮箱
+  # 为空或仍是占位符时才更新，避免覆盖机器上其他域名有意设置的提醒邮箱。
+  acme_conf="${HOME}/.acme.sh/account.conf"
+  cur_email="$(sed -n "s/^ACCOUNT_EMAIL='\(.*\)'\$/\1/p" "$acme_conf" 2>/dev/null)"
+  case "$cur_email" in
+    ""|*example.com*)
+      "$ACME" --update-account --accountemail "$CERT_EMAIL" >/dev/null 2>&1 \
+        || "$ACME" --register-account --accountemail "$CERT_EMAIL" >/dev/null 2>&1 \
+        || true
+      ;;
+    *)
+      say "  检测到已有账户邮箱 ${cur_email}，保持不变（不影响签发，仅影响到期提醒）。"
+      ;;
+  esac
+
   # 签发：dns_<provider> 对应 acme.sh 内置的 dnsapi 脚本，凭证已 export 进环境。
   "$ACME" --issue --dns "dns_${CERT_PROVIDER}" -d "$DOMAIN" --server letsencrypt
 
