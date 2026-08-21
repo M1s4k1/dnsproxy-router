@@ -348,6 +348,9 @@ func (c *Config) normalize() error {
 	if c.ProbeDomain == "" {
 		c.ProbeDomain = "example.com."
 	}
+	// 探测域名必须是完全限定域名（FQDN，以 . 结尾），否则 dnsproxy 打包查询时
+	// 报 "domain must be fully qualified"。此处自动补尾点，兼容手写配置遗漏。
+	c.ProbeDomain = strings.TrimRight(c.ProbeDomain, ".") + "."
 	if c.CacheEnabled == nil {
 		c.CacheEnabled = boolPtr(true)
 	}
