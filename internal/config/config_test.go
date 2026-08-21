@@ -3,7 +3,101 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
+
+func TestParseDuration(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"15m", 15 * time.Minute, true},
+		{"3s", 3 * time.Second, true},
+		{"1h", time.Hour, true},
+		{"100ms", 100 * time.Millisecond, true},
+		{"2d", 48 * time.Hour, true},
+		{"2d12h", 60 * time.Hour, true},
+		{"2d12h30m", 60*time.Hour + 30*time.Minute, true},
+		{"1d30m", 24*time.Hour + 30*time.Minute, true},
+		{"0s", 0, true},
+		{"1.5h", 90 * time.Minute, true},
+		{"1x", 0, false},
+		{"d", 0, false},
+		{"2dh", 0, false},
+		{"2d-3h", 0, false},
+		{"2d+3h", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, err := ParseDuration(c.in)
+		if c.ok && err != nil {
+			t.Fatalf("ParseDuration(%q) 应成功，得到 err=%v", c.in, err)
+		}
+		if !c.ok && err == nil {
+			t.Fatalf("ParseDuration(%q) 应失败，得到 %v", c.in, got)
+		}
+		if c.ok && got != c.want {
+			t.Fatalf("ParseDuration(%q) = %v，期望 %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLoadConfigDayDuration(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+probe_interval: 2d
+cache_ttl: 2d12h
+ip_latency_interval: 1d
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if time.Duration(c.ProbeInterval) != 48*time.Hour {
+		t.Fatalf("probe_interval 2d 应为 48h，得到 %v", c.ProbeInterval)
+	}
+	if c.CacheTTL == nil || time.Duration(*c.CacheTTL) != 60*time.Hour {
+		t.Fatalf("cache_ttl 2d12h 应为 60h，得到 %v", c.CacheTTL)
+	}
+	if time.Duration(c.IPLatencyInterval) != 24*time.Hour {
+		t.Fatalf("ip_latency_interval 1d 应为 24h，得到 %v", c.IPLatencyInterval)
+	}
+}
+
+func TestLoadConfigBadDayDuration(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+probe_interval: 1x
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法时长应报错")
+	}
+}
 
 func writeTemp(s string) error {
 	return os.WriteFile("/tmp/ecs_test_config.yaml", []byte(s), 0o644)
@@ -418,6 +512,114 @@ dns:
 	}
 	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
 		t.Fatalf("非法权重（>100）应报错")
+	}
+}
+
+func TestLoadConfigProviderIPPriority(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+ip_priority: ipv4
+provider_ip_priority:
+  cf: latency
+  adguard: ipv6
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+  adguard:
+    DNS-over-TLS: "tls://dns.adguard.com:853"
+  plain:
+    Plain DNS: "udp://8.8.8.8:53"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.IPPriorityFor("cf") != "latency" {
+		t.Fatalf("cf 优先级应为 latency，得到 %q", c.IPPriorityFor("cf"))
+	}
+	if c.IPPriorityFor("adguard") != "ipv6" {
+		t.Fatalf("adguard 优先级应为 ipv6，得到 %q", c.IPPriorityFor("adguard"))
+	}
+	if c.IPPriorityFor("plain") != "ipv4" {
+		t.Fatalf("未覆盖的 plain 应回退全局 ipv4，得到 %q", c.IPPriorityFor("plain"))
+	}
+}
+
+func TestLoadConfigBadProviderIPPriority(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+provider_ip_priority:
+  cf: foo
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法 provider_ip_priority 值应报错")
+	}
+}
+
+func TestIPPriorityFor(t *testing.T) {
+	c := Config{
+		IPPriority:         "ipv4",
+		ProviderIPPriority: map[string]string{"cf": "latency"},
+	}
+	if c.IPPriorityFor("cf") != "latency" {
+		t.Fatalf("命中的服务商应返回覆盖值")
+	}
+	if c.IPPriorityFor("unknown") != "ipv4" {
+		t.Fatalf("未命中的服务商应回退全局")
+	}
+}
+
+func TestUpstreamTargetsFor(t *testing.T) {
+	c := Config{
+		DNS: map[string]map[string]string{
+			"p1": {
+				"DNS-over-HTTPS": "https://doh.example.com:443/dns-query",
+				"DNS-over-TLS":   "tls://dot.example.com:853",
+			},
+			"p2": {
+				"Plain DNS": "udp://1.1.1.1:53",
+			},
+		},
+		Hosts: map[string][]string{
+			"onlyhosts.example.com": {"1.2.3.4"},
+		},
+	}
+
+	got := make(map[string]uint16)
+	for _, t := range c.UpstreamTargetsFor("p1") {
+		got[t.Host] = t.Port
+	}
+	if got["doh.example.com"] != 443 || got["dot.example.com"] != 853 {
+		t.Fatalf("p1 目标错误: %+v", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("p1 应只有 2 个目标，得到 %d", len(got))
+	}
+
+	// p2 的端点全为 IP 字面量，不应有探测目标。
+	if ts := c.UpstreamTargetsFor("p2"); len(ts) != 0 {
+		t.Fatalf("纯 IP 服务商不应有探测目标，得到 %+v", ts)
 	}
 }
 

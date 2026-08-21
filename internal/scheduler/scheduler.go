@@ -13,6 +13,7 @@ import (
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/miekg/dns"
 
+	"dnsproxy-router/internal/afp"
 	"dnsproxy-router/internal/cache"
 	"dnsproxy-router/internal/config"
 )
@@ -37,8 +38,13 @@ type probeResult struct {
 type Scheduler struct {
 	cfg      config.Config
 	logger   *slog.Logger
-	opts     *upstream.Options
 	probeMsg *dns.Msg
+
+	// providerOpts 为每个服务商的专属上游选项（Clone 自 base，按优先级改写）。
+	// 仅在调度 goroutine 内只读，无需加锁。
+	providerOpts map[string]*upstream.Options
+	// probers 为 latency 服务商的延迟探测器，Start 时统一启动。
+	probers []*afp.Prober
 
 	// mu 保护 current（Handler 并发读）。
 	mu      sync.RWMutex
@@ -50,16 +56,54 @@ type Scheduler struct {
 	done      chan struct{}
 }
 
-func New(cfg config.Config, logger *slog.Logger, opts *upstream.Options) *Scheduler {
-	return &Scheduler{
-		cfg:      cfg,
-		logger:   logger,
-		opts:     opts,
-		probeMsg: newProbeMsg(cfg.ProbeDomain),
-		current:  nil,
-		live:     make(map[string]upstream.Upstream),
-		done:     make(chan struct{}),
+// New 构造调度器。base 为共享的基础上游选项，其 Bootstrap 是未包 Selector 的
+// 引导解析链；每个服务商按其地址族优先级 Clone 出专属 opts。
+func New(cfg config.Config, logger *slog.Logger, base *upstream.Options) *Scheduler {
+	baseResolver := base.Bootstrap
+
+	s := &Scheduler{
+		cfg:          cfg,
+		logger:       logger,
+		probeMsg:     newProbeMsg(cfg.ProbeDomain),
+		providerOpts: make(map[string]*upstream.Options, len(cfg.DNS)),
+		current:      nil,
+		live:         make(map[string]upstream.Upstream),
+		done:         make(chan struct{}),
 	}
+
+	for name := range cfg.DNS {
+		opts := base.Clone()
+		switch cfg.IPPriorityFor(name) {
+		case "ipv6":
+			opts.PreferIPv6 = true
+		case "latency":
+			targets := afpTargetsOf(cfg.UpstreamTargetsFor(name))
+			// 端点全为 IP 字面量时无法测两族延迟，退化为 IPv4 静态偏好。
+			if len(targets) == 0 {
+				logger.Warn("latency 服务商无可探测主机名，退化为 IPv4 优先", "provider", name)
+				opts.PreferIPv6 = false
+				break
+			}
+			prober := afp.NewProber(logger, baseResolver, targets, time.Duration(cfg.IPLatencyInterval))
+			opts.Bootstrap = afp.NewSelector(baseResolver, afp.IPv4, prober)
+			opts.PreferIPv6 = false
+			s.probers = append(s.probers, prober)
+		default: // "ipv4"
+			opts.PreferIPv6 = false
+		}
+		s.providerOpts[name] = opts
+	}
+
+	return s
+}
+
+// afpTargetsOf 把 config 的探测目标转成 afp.Target。
+func afpTargetsOf(ts []config.UpstreamTarget) []afp.Target {
+	targets := make([]afp.Target, 0, len(ts))
+	for _, t := range ts {
+		targets = append(targets, afp.Target{Host: t.Host, Port: t.Port})
+	}
+	return targets
 }
 
 // newProbeMsg 构造一条 A 记录查询，用于探测。
@@ -71,13 +115,25 @@ func newProbeMsg(domain string) *dns.Msg {
 }
 
 // Start 启动调度循环：先立即探测一轮，之后按周期探测，退出时关闭所有存活上游。
+// 同时启动所有 per-provider 延迟探测器，并在退出前等待它们结束（保证 Stop 语义）。
 func (s *Scheduler) Start(ctx context.Context) {
-	defer close(s.done)
+	var wg sync.WaitGroup
+	for _, p := range s.probers {
+		wg.Add(1)
+		go func(p *afp.Prober) {
+			defer wg.Done()
+			p.Start(ctx)
+		}(p)
+	}
+
+	// defer 为 LIFO：执行顺序为 closeAllLive() → wg.Wait() → close(done)。
+	// 这样 Stop() 返回即代表调度循环与所有 prober 均已退出。
+	defer func() { wg.Wait(); close(s.done) }()
 	defer s.closeAllLive()
 
 	s.probeAndSelect(ctx)
 
-	ticker := time.NewTicker(s.cfg.ProbeInterval)
+	ticker := time.NewTicker(time.Duration(s.cfg.ProbeInterval))
 	defer ticker.Stop()
 
 	for {
@@ -161,7 +217,7 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 	members := make([]racingMember, 0, len(selected))
 	for name, b := range selected {
 		selAddr[name] = b.addr
-		selUp[b.addr] = b.upstream
+		selUp[name+"\x00"+b.addr] = b.upstream
 		members = append(members, racingMember{
 			weight:   s.cfg.Weight(name),
 			upstream: b.upstream,
@@ -180,7 +236,7 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		// 路径（UpstreamModeParallel 对单元素直接调 Exchange），由聚合上游内部
 		// 并发查询并实现 fastest（谁先成功用谁）或 weighted（加权 + 延时窗口）。
 		weighted := s.cfg.UpstreamMode == "weighted"
-		racing := newRacing(members, weighted, s.cfg.RaceWindow)
+		racing := newRacing(members, weighted, time.Duration(s.cfg.RaceWindow))
 
 		// 缓存包在聚合层外层：一个请求先查缓存，未命中才并发查所有子并回填，
 		// 避免各上游重复查询。共享同一实例，跟随选路生命周期，选路变化时重建。
@@ -188,7 +244,7 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		if *s.cfg.CacheEnabled {
 			shared := cache.New(cache.Config{
 				MaxBytes: int64(s.cfg.CacheSizeBytes),
-				TTL:      *s.cfg.CacheTTL,
+				TTL:      time.Duration(*s.cfg.CacheTTL),
 				Eviction: cache.Policy(s.cfg.CacheEviction),
 			})
 			finalUp = s.wrapCached(racing, shared)
@@ -209,9 +265,9 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 	s.mu.Unlock()
 
 	// 延迟 2×ProbeTimeout 关闭退役线路，让进行中的请求（超时上限 ProbeTimeout）先结束，避免 use-after-close。
-	delay := 2 * s.cfg.ProbeTimeout
-	for addr, u := range s.live {
-		if _, keep := selUp[addr]; keep {
+	delay := 2 * time.Duration(s.cfg.ProbeTimeout)
+	for key, u := range s.live {
+		if _, keep := selUp[key]; keep {
 			continue
 		}
 		u := u
@@ -246,10 +302,11 @@ func (s *Scheduler) probeProvider(ctx context.Context, name string, modes map[st
 				fresh bool
 				err   error
 			)
-			if existing := s.live[addr]; existing != nil {
+			key := name + "\x00" + addr
+			if existing := s.live[key]; existing != nil {
 				u = existing
 			} else {
-				u, err = upstream.AddressToUpstream(addr, s.opts)
+				u, err = upstream.AddressToUpstream(addr, s.providerOpts[name])
 				if err != nil {
 					s.logger.Warn("解析上游失败", "provider", name, "mode", mode, "addr", addr, "err", err)
 					return

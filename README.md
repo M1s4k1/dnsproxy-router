@@ -76,6 +76,8 @@ dig @你的域名 example.com A
 
 配置文件为 YAML（见 [config.example.yaml](config.example.yaml)）。交互脚本会引导你生成 `config.yaml`（默认路径 `/etc/dnsproxy/config.yaml`）；也可手动 `cp config.example.yaml config.yaml` 后编辑。关键字段：
 
+> 所有时长字段（`probe_interval`、`probe_timeout`、`cache_ttl`、`bootstrap_cache_ttl`、`ip_latency_interval`、`race_window`）支持单位 `ns` / `us` / `ms` / `s` / `m` / `h` / `d`（`d`=天，`1d`=24h），可组合如 `2d12h`、`2d12h30m`。
+
 | 字段 | 说明 | 默认 |
 | --- | --- | --- |
 | `use_domain` | 是否使用域名（证书申请） | `true` |
@@ -102,7 +104,8 @@ dig @你的域名 example.com A
 | `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53, 8.8.8.8:53` |
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（`0s` 关闭） | `0s` |
 | `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
-| `ip_priority` | 双栈时的地址族优先级：`ipv4` \| `ipv6` \| `latency` | `ipv4` |
+| `ip_priority` | 双栈时的地址族优先级（全局兜底）：`ipv4` \| `ipv6` \| `latency` | `ipv4` |
+| `provider_ip_priority` | 每个服务商覆盖全局 `ip_priority` 的优先级，键为服务商名 | 空（回退全局） |
 | `ip_latency_interval` | `latency` 模式的延迟探测周期 | `15m` |
 | `upstream_mode` | 查询结果赛马模式：`fastest` \| `weighted` | `fastest` |
 | `upstream_weights` | `weighted` 模式下各服务商权重（1-100），键为服务商名 | 空（默认 1） |
@@ -156,7 +159,7 @@ listeners:
 
 开启缓存后，除大小（`cache_size_bytes`）外还可配置两个维度：
 
-- **过期时间（`cache_ttl`）**：固定过期时间，如 `30m` / `1h`。设 `0s` 表示不设固定值，跟随响应记录自身的 TTL。
+- **过期时间（`cache_ttl`）**：固定过期时间，如 `30m` / `1h` / `2d`。设 `0s` 表示不设固定值，跟随响应记录自身的 TTL。
 - **逐出策略（`cache_eviction`）**：缓存写满后，按哪种顺序淘汰旧条目：
 
 | 值 | 策略 | 逐出对象 |
@@ -193,19 +196,30 @@ ip_latency_interval: 15m
 - 键为上游主机名（可带或不带尾部点），值为 IP 列表（IPv4/IPv6 均可）。
 - 命中即直接使用给定 IP，不再查询引导 DNS；未命中的域名照常走引导 DNS。
 
-### `ip_priority` 字段：双栈地址族优先级
+### `ip_priority` / `provider_ip_priority` 字段：双栈地址族优先级
 
-当上游域名同时能解析出 IPv4 与 IPv6（无论来自 `hosts` 静态映射还是引导 DNS）时，用 `ip_priority` 决定优先用哪一族的地址：
+当上游域名同时能解析出 IPv4 与 IPv6（无论来自 `hosts` 静态映射还是引导 DNS）时，决定优先用哪一族的地址。优先级**可按服务商单独配置**：
 
 | 值 | 行为 |
 | --- | --- |
 | `ipv4` | IPv4 优先，连接失败自动回退 IPv6（默认） |
 | `ipv6` | IPv6 优先，连接失败自动回退 IPv4 |
-| `latency` | 周期探测两族连接延迟，选全局平均延迟更低的一族 |
+| `latency` | 周期探测两族连接延迟，选平均延迟更低的一族 |
 
-- `latency` 模式下，程序每隔 `ip_latency_interval`（默认 `15m`）解析每个上游域名、分别测 IPv4/IPv6 的连接延迟，比较全局平均后切换优选族；两次探测之间使用上次选定的族。
-- 探测目标来自 `dns` 各模式地址的主机名（DoH→443、DoT/DoQ→853、明文→53），`hosts` 里额外出现的域名按 443 探测。
+- `ip_priority` 是**全局兜底**；`provider_ip_priority`（map，键为 `dns` 里的服务商名）为每家覆盖，未列出的服务商回退全局值。
+- `latency` 模式下，程序每隔 `ip_latency_interval`（默认 `15m`）解析该服务商自己的主机名、分别测 IPv4/IPv6 连接延迟，比较平均后切换优选族；两次探测之间使用上次选定的族。探测周期全局统一。
 - `ipv4` / `ipv6` 模式是静态偏好，`ip_latency_interval` 不生效。
+
+```yaml
+ip_priority: ipv4          # 全局兜底
+provider_ip_priority:
+  cf: latency              # 只 cf 按延迟选族
+  adguard: ipv6            # 只 adguard IPv6 优先
+```
+
+- 探测目标来自该服务商 `dns` 各模式地址里的主机名（DoH→443、DoT/DoQ→853、明文→53）；纯 IP 字面量的服务商无主机名可测，`latency` 自动退化为 IPv4。
+- `hosts` 里被固定为单栈的域名无法参与 `latency` 动态选族（探测只测得到单栈）。
+- 注意：DoH 客户端对解析结果有粘性（连接复用使 `latency` 选族对 DoH 滞后，直到连接重建）；DoT / 明文每请求重新解析，可即时切换。
 
 ### `upstream_mode` 字段：查询结果赛马模式
 

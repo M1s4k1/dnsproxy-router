@@ -41,6 +41,7 @@ cert:
   provider: "cloudflare"  # DNS API 提供商（acme DNS-01 用）
 
 # 探测参数
+# 时长字段单位：ns / us / ms / s / m / h / d（d=天，1d=24h），可组合如 2d12h、2d12h30m
 probe_interval: 15m      # 探测周期
 probe_timeout: 3s        # 单次探测超时
 probe_count: 3           # 每模式探测次数（取中位数）
@@ -74,7 +75,14 @@ hosts: {}
 #   latency 按延迟动态选族（周期探测两族延迟，选低延迟者）
 ip_priority: ipv4
 
-# ip_priority: latency 时的延迟探测周期
+# 每个服务商覆盖全局 ip_priority 的优先级，键为 dns 里的服务商名；
+# 未列出的服务商回退到上面的 ip_priority。
+# latency 的延迟探测周期仍全局统一（ip_latency_interval）。
+provider_ip_priority: {}
+#  cf: latency
+#  adguard: ipv6
+
+# ip_priority 或 provider_ip_priority 中 latency 时的延迟探测周期
 ip_latency_interval: 15m
 
 # 上游查询结果的赛马模式：
