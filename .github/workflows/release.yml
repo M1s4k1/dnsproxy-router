@@ -43,10 +43,10 @@ jobs:
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
           go build -trimpath -ldflags "-s -w" \
-            -o "dnsproxy-scheduler-${{ matrix.asset }}${ext}" ./cmd/dnsproxy
+            -o "dnsproxy-router-${{ matrix.asset }}${ext}" ./cmd/dnsproxy
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dnsproxy-scheduler-${{ matrix.asset }}*
+          files: dnsproxy-router-${{ matrix.asset }}*

@@ -7,7 +7,7 @@ import (
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/miekg/dns"
 
-	"dnsproxy-scheduler/internal/cache"
+	"dnsproxy-router/internal/cache"
 )
 
 // racingMember 是参与赛马的一个上游及其权重。

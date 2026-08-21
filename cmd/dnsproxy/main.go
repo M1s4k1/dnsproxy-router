@@ -1,4 +1,4 @@
-// dnsproxy-scheduler 入口：对外提供 DoH/DoT/DoQ/明文 DNS 的 DNS 代理，
+// dnsproxy-router 入口：对外提供 DoH/DoT/DoQ/明文 DNS 的 DNS 代理，
 // 内部对多家上游做「动态择优 + 并发赛马」。
 package main
 
@@ -19,12 +19,12 @@ import (
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 
-	"dnsproxy-scheduler/internal/afp"
-	bootstrapcache "dnsproxy-scheduler/internal/bootstrap"
-	"dnsproxy-scheduler/internal/config"
-	"dnsproxy-scheduler/internal/ecs"
-	"dnsproxy-scheduler/internal/handler"
-	"dnsproxy-scheduler/internal/scheduler"
+	"dnsproxy-router/internal/afp"
+	bootstrapcache "dnsproxy-router/internal/bootstrap"
+	"dnsproxy-router/internal/config"
+	"dnsproxy-router/internal/ecs"
+	"dnsproxy-router/internal/handler"
+	"dnsproxy-router/internal/scheduler"
 )
 
 func main() {
@@ -152,7 +152,7 @@ func main() {
 			}
 			proxyCfg.HTTPConfig = &proxy.HTTPConfig{
 				ListenAddresses: []netip.AddrPort{ap},
-				ServerHeader:    "dnsproxy-scheduler",
+				ServerHeader:    "dnsproxy-router",
 				Routes:          []string{http.MethodGet + " " + ls.DoH.Path, http.MethodPost + " " + ls.DoH.Path},
 			}
 		}
@@ -182,7 +182,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("dnsproxy-scheduler 已启动",
+	logger.Info("dnsproxy-router 已启动",
 		"doh", ls.DoH.Enabled, "dot", ls.DoT.Enabled, "doq", ls.DoQ.Enabled,
 		"plain_dns", ls.PlainDNS.Enabled, "probe_interval", cfg.ProbeInterval)
 

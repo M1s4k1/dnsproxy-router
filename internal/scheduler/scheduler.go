@@ -13,8 +13,8 @@ import (
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/miekg/dns"
 
-	"dnsproxy-scheduler/internal/cache"
-	"dnsproxy-scheduler/internal/config"
+	"dnsproxy-router/internal/cache"
+	"dnsproxy-router/internal/config"
 )
 
 // modeOrder 定义探测时模式的稳定遍历顺序，避免 map 无序导致日志抖动。

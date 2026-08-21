@@ -8,8 +8,8 @@ import (
 
 	"github.com/AdguardTeam/dnsproxy/proxy"
 
-	"dnsproxy-scheduler/internal/ecs"
-	"dnsproxy-scheduler/internal/scheduler"
+	"dnsproxy-router/internal/ecs"
+	"dnsproxy-router/internal/scheduler"
 )
 
 // Handler 把 scheduler 当前周期的选路（各家最优线路 + 缓存）注入每个请求，

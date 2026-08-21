@@ -1,4 +1,4 @@
-module dnsproxy-scheduler
+module dnsproxy-router
 
 go 1.26.6
 
