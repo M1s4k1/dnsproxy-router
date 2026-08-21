@@ -1,4 +1,4 @@
-// Package config 定义并加载 dnsproxy-scheduler 的 YAML 配置。
+// Package config 定义并加载 dnsproxy-router 的 YAML 配置。
 package config
 
 import (
@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"dnsproxy-scheduler/internal/ecs"
+	"dnsproxy-router/internal/ecs"
 	"gopkg.in/yaml.v3"
 )
 

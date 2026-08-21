@@ -1,4 +1,4 @@
-# dnsproxy-scheduler 配置示例
+# dnsproxy-router 配置示例
 # 用法：复制为 config.yaml 后，把下面示例值替换成你自己的再启动。
 #   cp config.example.yaml config.yaml
 # 字段说明见 README。

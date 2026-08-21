@@ -1,4 +1,4 @@
-# dnsproxy-scheduler
+# dnsproxy-router
 
 一个对外提供 **DoH / DoT / DoQ / 明文 DNS** 的 DNS 代理，内部对多家上游服务商做「动态择优 + 并发赛马」。
 
@@ -68,8 +68,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/M1s4k1/dnsproxy/main/interac
 在**本项目根目录**（`dnsproxy/`）执行，按目标服务器架构选择：
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # x86_64
-GOOS=linux GOARCH=arm64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # arm64
+GOOS=linux GOARCH=amd64 go build -o dnsproxy-router ./cmd/dnsproxy  # x86_64
+GOOS=linux GOARCH=arm64 go build -o dnsproxy-router ./cmd/dnsproxy  # arm64
 ```
 
 > 需要 Go 1.26+。本地没装那么新也没关系——`GOTOOLCHAIN=auto`（默认）会自动下载对应工具链，首次构建需联网。
@@ -77,14 +77,14 @@ GOOS=linux GOARCH=arm64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # arm64
 上传二进制和脚本到服务器：
 
 ```bash
-scp dnsproxy-scheduler interactive-setup.sh root@SERVER_IP:/root/
+scp dnsproxy-router interactive-setup.sh root@SERVER_IP:/root/
 ```
 
 在服务器上跑交互脚本（完成部署）：
 
 ```bash
 ssh root@SERVER_IP
-bash /root/interactive-setup.sh /root/dnsproxy-scheduler   # 显式传入本地二进制
+bash /root/interactive-setup.sh /root/dnsproxy-router   # 显式传入本地二进制
 ```
 
 > 脚本也支持不带参数运行，此时会走「下载 Release → 源码编译 → 安装 Go」的自动获取流程；带本地二进制路径参数则直接使用，跳过获取。
@@ -323,9 +323,9 @@ ecs:
 ## 构建
 
 ```bash
-go build -o dnsproxy-scheduler ./cmd/dnsproxy                          # 本机架构
-GOOS=linux GOARCH=amd64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # x86_64
-GOOS=linux GOARCH=arm64 go build -o dnsproxy-scheduler ./cmd/dnsproxy  # arm64
+go build -o dnsproxy-router ./cmd/dnsproxy                          # 本机架构
+GOOS=linux GOARCH=amd64 go build -o dnsproxy-router ./cmd/dnsproxy  # x86_64
+GOOS=linux GOARCH=arm64 go build -o dnsproxy-router ./cmd/dnsproxy  # arm64
 ```
 
 其他常用命令：
@@ -342,9 +342,9 @@ gofmt -l ./cmd ./internal   # 检查格式
 
 | 平台 | 架构 | 产物名 |
 | --- | --- | --- |
-| Linux | amd64 / arm64 / armv7 | `dnsproxy-scheduler-linux-{amd64,arm64,armv7}` |
-| macOS | amd64 / arm64 | `dnsproxy-scheduler-darwin-{amd64,arm64}` |
-| Windows | amd64 / arm64 | `dnsproxy-scheduler-windows-{amd64,arm64}.exe` |
+| Linux | amd64 / arm64 / armv7 | `dnsproxy-router-linux-{amd64,arm64,armv7}` |
+| macOS | amd64 / arm64 | `dnsproxy-router-darwin-{amd64,arm64}` |
+| Windows | amd64 / arm64 | `dnsproxy-router-windows-{amd64,arm64}.exe` |
 
 ```bash
 git tag v1.0.0
@@ -366,7 +366,7 @@ git push origin v1.0.0
 
 ```ini
 [Service]
-ExecStart=/usr/local/bin/dnsproxy-scheduler -config /etc/dnsproxy/config.yaml
+ExecStart=/usr/local/bin/dnsproxy-router -config /etc/dnsproxy/config.yaml
 Restart=always
 ```
 
@@ -375,9 +375,9 @@ Restart=always
 ### 运维命令
 
 ```bash
-systemctl status dnsproxy-scheduler      # 查看状态
-journalctl -u dnsproxy-scheduler -f      # 实时日志
-systemctl restart dnsproxy-scheduler     # 重启（改配置后）
+systemctl status dnsproxy-router      # 查看状态
+journalctl -u dnsproxy-router -f      # 实时日志
+systemctl restart dnsproxy-router     # 重启（改配置后）
 ```
 
 ## 说明

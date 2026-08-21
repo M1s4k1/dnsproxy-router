@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================================
-# dnsproxy-scheduler 交互式配置 + 部署脚本
+# dnsproxy-router 交互式配置 + 部署脚本
 # 通过交互引导用户填写配置，生成 config.yaml，申请证书，部署并启动服务。
 #
 # 用法（root 下执行，Linux + systemd）:
@@ -21,8 +21,8 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/etc/dnsproxy"
 CONF_FILE="${CONF_DIR}/config.yaml"
 CERT_DIR="${CONF_DIR}/certs"
-SERVICE="dnsproxy-scheduler"
-BIN_NAME="dnsproxy-scheduler"
+SERVICE="dnsproxy-router"
+BIN_NAME="dnsproxy-router"
 
 # 下载 release 用的 GitHub 仓库（fork 本项目后改成你自己的）。
 REPO="M1s4k1/dnsproxy"
@@ -367,7 +367,7 @@ obtain_binary() {
 
 say ""
 say "=========================================================="
-say "  dnsproxy-scheduler 交互式配置向导"
+say "  dnsproxy-router 交互式配置向导"
 say "=========================================================="
 say ""
 
@@ -807,7 +807,7 @@ fi
 # --- 9. systemd 单元 + 启动 ---
 cat > "/etc/systemd/system/${SERVICE}.service" <<EOF
 [Unit]
-Description=dnsproxy-scheduler (DNS proxy with racing upstreams)
+Description=dnsproxy-router (DNS proxy with racing upstreams)
 After=network-online.target
 Wants=network-online.target
 
