@@ -162,6 +162,28 @@ normalize_upstream_addr() {
   printf '%s' "${scheme}://${host}${path}"
 }
 
+# extract_host <规范化后的上游地址> -> 输出 host（去 scheme/端口/路径/方括号）。
+extract_host() {
+  local s="$1"
+  s="${s#*://}"      # 去 scheme://
+  s="${s%%/*}"       # 去路径
+  if [[ "$s" == \[*\]* ]]; then
+    s="${s#\[}"
+    s="${s%%\]*}"    # 取 [ ] 内
+  else
+    s="${s%%:*}"     # 去 :port
+  fi
+  printf '%s' "$s"
+}
+
+# is_ip <host> -> 0(是 IP)/1(否)。IPv4 点分四段，IPv6 含冒号。
+is_ip() {
+  local h="$1"
+  [[ "$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && return 0
+  [[ "$h" == *:* ]] && return 0
+  return 1
+}
+
 # ============================================================================
 # DNS 提供商（acme.sh DNS-01）
 # 脚本只负责「选 provider + 收集凭证 + 调 acme.sh」，签发/续期逻辑全部复用
@@ -579,43 +601,10 @@ for ip in "${BOOTSTRAP_ARR[@]}"; do
   BOOTSTRAP_LIST+="  - \"${ip}\""$'\n'
 done
 
-# 域名 → IP 静态映射：命中即直接用给定 IP，不再走引导 DNS。
-say ""
-say "  上游域名 → IP 静态映射（可选）：对指定域名固定其解析 IP，跳过引导 DNS。"
-say "  例如上游主机名 dns.example.com 固定解析到 1.2.3.4。留空跳过。"
+# 「上游域名 → IP 静态映射」已移至第 5 步：为每个加密 DNS 域名询问是否固定解析。
 HOSTS_BLOCK=""
 HOSTS_COUNT=0
 HOSTS_DUALSTACK=0
-while :; do
-  say ""
-  read -rp "  上游域名（留空结束）: " hname
-  [ -z "$hname" ] && break
-  hname="$(printf '%s' "$hname" | xargs)"
-  read -rp "    该域名的 IP（IPv4/IPv6，逗号分隔多个）: " haddrs
-  haddrs="$(printf '%s' "$haddrs" | xargs)"
-  [ -z "$haddrs" ] && continue
-  HOSTS_BLOCK+="  \"${hname}\":"$'\n'
-  IFS=',' read -ra HADDR_ARR <<< "$haddrs"
-  has_v4=0; has_v6=0
-  for ha in "${HADDR_ARR[@]}"; do
-    ha="$(printf '%s' "$ha" | xargs)"
-    [ -z "$ha" ] && continue
-    HOSTS_BLOCK+="    - \"${ha}\""$'\n'
-    case "$ha" in
-      *:*) has_v6=1 ;;
-      *)   has_v4=1 ;;
-    esac
-  done
-  [ "$has_v4" -eq 1 ] && [ "$has_v6" -eq 1 ] && HOSTS_DUALSTACK=1
-  HOSTS_COUNT=$((HOSTS_COUNT + 1))
-done
-
-# 组装 hosts 段：空映射输出 hosts: {}，否则输出 hosts: + 映射行。
-if [ "$HOSTS_COUNT" -gt 0 ]; then
-  HOSTS_YAML="hosts:"$'\n'"${HOSTS_BLOCK}"
-else
-  HOSTS_YAML="hosts: {}"$'\n'
-fi
 
 # --- 5. 上游 DNS（循环添加）---
 say ""
@@ -642,15 +631,49 @@ while :; do
       4) mode="Plain DNS" ;;
       *) break ;;
     esac
-    read -rp "    ${mode} 地址（可不带前缀/端口，如 dns.example.com 或 1.1.1.1）: " maddr
+    read -rp "    ${mode} 地址（dns.example.com）: " maddr
     [ -z "$maddr" ] && continue
     maddr="$(normalize_upstream_addr "$mode" "$maddr")"
     say "      已规范化为: ${maddr}"
     DNS_BLOCK+="    ${mode}: \"${maddr}\""$'\n'
+
+    # 加密协议且输入的是域名：询问是否固定解析（IP 静态映射，跳过引导 DNS）。
+    if [ "$mode" != "Plain DNS" ]; then
+      h="$(extract_host "$maddr")"
+      if ! is_ip "$h"; then
+        if ask_yn "    是否将 ${h} 固定解析到指定 IP（IP 静态映射）" "n"; then
+          read -rp "      ${h} 的 IP（IPv4/IPv6，逗号分隔多个）: " h_ips
+          h_ips="$(printf '%s' "$h_ips" | xargs)"
+          if [ -n "$h_ips" ]; then
+            HOSTS_BLOCK+="  \"${h}\":"$'\n'
+            IFS=',' read -ra HADDR_ARR <<< "$h_ips"
+            has_v4=0; has_v6=0
+            for ha in "${HADDR_ARR[@]}"; do
+              ha="$(printf '%s' "$ha" | xargs)"
+              [ -z "$ha" ] && continue
+              HOSTS_BLOCK+="    - \"${ha}\""$'\n'
+              case "$ha" in
+                *:*) has_v6=1 ;;
+                *)   has_v4=1 ;;
+              esac
+            done
+            [ "$has_v4" -eq 1 ] && [ "$has_v6" -eq 1 ] && HOSTS_DUALSTACK=1
+            HOSTS_COUNT=$((HOSTS_COUNT + 1))
+          fi
+        fi
+      fi
+    fi
   done
 done
 
 [ -z "$DNS_BLOCK" ] && { warn "未配置任何上游，退出。"; exit 1; }
+
+# 组装 hosts 段：空映射输出 hosts: {}，否则输出 hosts: + 映射行。
+if [ "$HOSTS_COUNT" -gt 0 ]; then
+  HOSTS_YAML="hosts:"$'\n'"${HOSTS_BLOCK}"
+else
+  HOSTS_YAML="hosts: {}"$'\n'
+fi
 
 # 上游查询结果的赛马模式：最快返回 vs 加权 + 延时窗口。
 say ""
