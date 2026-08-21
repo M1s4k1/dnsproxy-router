@@ -25,7 +25,7 @@ SERVICE="dnsproxy-router"
 BIN_NAME="dnsproxy-router"
 
 # 下载 release 用的 GitHub 仓库（fork 本项目后改成你自己的）。
-REPO="M1s4k1/dnsproxy"
+REPO="M1s4k1/dnsproxy-router"
 # 下载的 release 版本：latest 表示最新 release；也可指定如 v1.0.0。
 VERSION="${VERSION:-latest}"
 # 未安装 Go 时安装的版本（应与 go.mod 的 go 指令一致）。

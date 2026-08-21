@@ -4,92 +4,22 @@
 
 基于 [AdguardTeam/dnsproxy](https://github.com/AdguardTeam/dnsproxy) 库构建，DNS 编解码、各协议前端、去重由成熟库承担；调度层（选路、赛马、响应缓存、ECS 策略、引导解析）为自建实现。
 
-## 特性
+## 一键安装
 
-- **多协议入站**：入站监听支持 DoH / DoT / DoQ / 明文 DNS（UDP+TCP），各自独立开关与端口。
-- **动态择优**：周期性探测每家上游各模式的延迟，自动为每家选出延迟最低的模式。
-- **并发赛马**：每次查询向各家「当前最优线路」并发发出，支持「最快返回」与「加权 + 延时窗口」两种选择模式。
-- **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
-- **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
-- **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
-- **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS（明文 IPv4/IPv6）。
-
-## 目录结构
-
-```text
-dnsproxy/
-├── cmd/dnsproxy/main.go        # 程序入口（组装各包、启动服务）
-├── internal/
-│   ├── config/                 # YAML 配置的加载与校验
-│   ├── ecs/                    # EDNS Client Subnet 策略
-│   ├── scheduler/              # 周期性探测 + 选路 + 赛马 + 缓存
-│   ├── handler/                # 把选路注入每个请求
-│   ├── cache/                  # 自建 DNS 响应缓存（TTL + 逐出策略）
-│   ├── bootstrap/              # 引导解析缓存 + 域名→IP 静态映射
-│   └── afp/                    # 地址族优先级（按延迟动态选族）
-├── config.example.yaml         # 配置示例（复制为 config.yaml 后使用）
-├── interactive-setup.sh        # 交互式部署脚本（服务器上运行）
-└── go.mod / go.sum
-```
-
-## 工作原理
-
-```text
-                 ┌─────────────────────────────────────────────┐
-                 │               周期性探路                     │
-                 │  对每家 × 每种模式 发 A 记录查询测 RTT        │
-                 │  每家选出延迟最低的模式                       │
-                 │  （例如 provider-a→DoH, provider-b→DoQ）      │
-                 └─────────────────────────────────────────────┘
-                                    │ 更新选路
-                                    ▼
-  客户端 ──DoH/DoT/DoQ/明文──▶ 多家并发赛马 ──▶ 最快者返回
-```
-
-- **外层（scheduler）**：每 `probe_interval`（默认 15m）探测，每家各模式探测 `probe_count` 次取中位数 RTT，选出每家延迟最低的模式。
-- **内层（赛马）**：每次收到查询，向各家「当前最优线路」并发查询，按 `upstream_mode` 选择结果——`fastest`（谁先成功返回用谁）或 `weighted`（加权 + 延时窗口）。
-
-## 快速开始
-
-### ① 一键安装（推荐，Linux + systemd）
-
-在目标服务器上以 root 执行：
+在目标服务器（Linux + systemd）上以 root 执行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/M1s4k1/dnsproxy/main/interactive-setup.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/M1s4k1/dnsproxy-router/main/interactive-setup.sh)
 ```
 
-脚本会自动完成：**检查 root / 系统类型 / CPU 架构（amd64·arm64·armv7）→ 获取二进制（有匹配架构的 Release 直接下载，否则源码编译，未装 Go 则先装官方 Go）→ 交互引导填配置 → 生成 `config.yaml` → 安装二进制 → 申请证书（acme.sh + DNS-01，仅加密协议开启时）→ 写 systemd 单元并启动服务**。
+脚本会自动完成：
 
-> fork 本项目后，把脚本里的 `REPO="M1s4k1/dnsproxy"` 改成你自己的仓库，即可从你自己的 Release 下载。
+1. **检查** root 权限、系统类型、CPU 架构（amd64 / arm64 / armv7）
+2. **获取二进制**：有匹配架构的 GitHub Release 直接下载；否则源码编译；未装 Go 则先装官方 Go
+3. **交互引导** 填配置：入站监听 → 域名/证书 → ECS 策略 → 探测参数 → 缓存与引导 → 上游 DNS
+4. **部署**：生成 `config.yaml` → 安装二进制到 `/usr/local/bin/` → 申请证书（acme.sh + DNS-01，仅加密协议开启时）→ 写 systemd 单元 → 启动服务
 
-### ② 手动：本地编译 + 上传
-
-在**本项目根目录**（`dnsproxy/`）执行，按目标服务器架构选择：
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o dnsproxy-router ./cmd/dnsproxy  # x86_64
-GOOS=linux GOARCH=arm64 go build -o dnsproxy-router ./cmd/dnsproxy  # arm64
-```
-
-> 需要 Go 1.26+。本地没装那么新也没关系——`GOTOOLCHAIN=auto`（默认）会自动下载对应工具链，首次构建需联网。
-
-上传二进制和脚本到服务器：
-
-```bash
-scp dnsproxy-router interactive-setup.sh root@SERVER_IP:/root/
-```
-
-在服务器上跑交互脚本（完成部署）：
-
-```bash
-ssh root@SERVER_IP
-bash /root/interactive-setup.sh /root/dnsproxy-router   # 显式传入本地二进制
-```
-
-> 脚本也支持不带参数运行，此时会走「下载 Release → 源码编译 → 安装 Go」的自动获取流程；带本地二进制路径参数则直接使用，跳过获取。
-
-脚本会一步步引导你：**入站监听（每种协议是否开启 + 端口）→ 域名/证书 → ECS 策略 → 探测参数 → 缓存与引导 → 上游 DNS**。
+> fork 本项目后，把脚本里的 `REPO="M1s4k1/dnsproxy-router"` 改成你自己的仓库，即可从你自己的 Release 下载。
 
 ### 验证
 
@@ -115,9 +45,36 @@ dig @你的域名 example.com A
 
 返回二进制 DNS 报文即为正常。`dns-query` 换成你配置的 DoH `path`（支持多层子路径，如 `/dns/query/v1`）。若配置了非默认端口，URL/命令需补上 `:端口`。
 
+## 特性
+
+- **多协议入站**：入站监听支持 DoH / DoT / DoQ / 明文 DNS（UDP+TCP），各自独立开关与端口。
+- **动态择优**：周期性探测每家上游各模式的延迟，自动为每家选出延迟最低的模式。
+- **并发赛马**：每次查询向各家「当前最优线路」并发发出，支持「最快返回」与「加权 + 延时窗口」两种选择模式。
+- **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
+- **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
+- **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
+- **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS（明文 IPv4/IPv6）。
+
+## 工作原理
+
+```text
+                 ┌─────────────────────────────────────────────┐
+                 │               周期性探路                     │
+                 │  对每家 × 每种模式 发 A 记录查询测 RTT        │
+                 │  每家选出延迟最低的模式                       │
+                 │  （例如 provider-a→DoH, provider-b→DoQ）      │
+                 └─────────────────────────────────────────────┘
+                                    │ 更新选路
+                                    ▼
+  客户端 ──DoH/DoT/DoQ/明文──▶ 多家并发赛马 ──▶ 最快者返回
+```
+
+- **外层（scheduler）**：每 `probe_interval`（默认 15m）探测，每家各模式探测 `probe_count` 次取中位数 RTT，选出每家延迟最低的模式。
+- **内层（赛马）**：每次收到查询，向各家「当前最优线路」并发查询，按 `upstream_mode` 选择结果——`fastest`（谁先成功返回用谁）或 `weighted`（加权 + 延时窗口）。
+
 ## 配置
 
-配置文件为 YAML（见 [config.example.yaml](config.example.yaml)），复制为 `config.yaml` 后编辑。关键字段：
+配置文件为 YAML（见 [config.example.yaml](config.example.yaml)）。交互脚本会引导你生成 `config.yaml`（默认路径 `/etc/dnsproxy/config.yaml`）；也可手动 `cp config.example.yaml config.yaml` 后编辑。关键字段：
 
 | 字段 | 说明 | 默认 |
 | --- | --- | --- |
@@ -320,13 +277,17 @@ ecs:
 - `off` / `override` 模式下 ECS 是确定性的，缓存对所有客户端一致，安全。
 - `pass` 模式下 ECS 随客户端变化，会自动启用 subnet 缓存，避免不同地域客户端串缓存。
 
-## 构建
+## 构建与发布
+
+### 本地构建
 
 ```bash
 go build -o dnsproxy-router ./cmd/dnsproxy                          # 本机架构
 GOOS=linux GOARCH=amd64 go build -o dnsproxy-router ./cmd/dnsproxy  # x86_64
 GOOS=linux GOARCH=arm64 go build -o dnsproxy-router ./cmd/dnsproxy  # arm64
 ```
+
+> 需要 Go 1.26+。本地没装那么新也没关系——`GOTOOLCHAIN=auto`（默认）会自动下载对应工具链，首次构建需联网。
 
 其他常用命令：
 
@@ -353,26 +314,18 @@ git push origin v1.0.0
 
 发布后，服务器上的 `interactive-setup.sh` 会优先从 Release 下载匹配架构的二进制（见上文一键安装）。
 
-## 部署
+## 运维
 
-### 方式一：交互式脚本（推荐）
+安装完成后，服务名、二进制与配置路径：
 
-见上文「快速开始」。脚本负责「获取二进制（下载 Release / 源码编译）→ 生成配置 → 申请证书 → 写 systemd 并启动」。
+| 项目 | 路径 |
+| --- | --- |
+| systemd 服务 | `dnsproxy-router`（`/etc/systemd/system/dnsproxy-router.service`） |
+| 二进制 | `/usr/local/bin/dnsproxy-router` |
+| 配置文件 | `/etc/dnsproxy/config.yaml` |
+| 证书目录 | `/etc/dnsproxy/certs/` |
 
-### 方式二：手动
-
-- 本地先 `cp config.example.yaml config.yaml` 并填入真实值，再把二进制 + `config.yaml` 传到服务器，证书放到 `cert.cert_path` 指定位置。
-- 用 `cert.mode: existing` 时，证书需提前备好；systemd 运行：
-
-```ini
-[Service]
-ExecStart=/usr/local/bin/dnsproxy-router -config /etc/dnsproxy/config.yaml
-Restart=always
-```
-
-- 在服务器防火墙 / 云安全组放行你所开启协议的端口：DoH=`443/tcp`、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
-
-### 运维命令
+常用命令：
 
 ```bash
 systemctl status dnsproxy-router      # 查看状态
@@ -380,8 +333,28 @@ journalctl -u dnsproxy-router -f      # 实时日志
 systemctl restart dnsproxy-router     # 重启（改配置后）
 ```
 
+服务器防火墙 / 云安全组需放行你所开启协议的端口：DoH=`443/tcp`、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
+
 ## 说明
 
 - 每轮探测后，若各家最优线路未变化，则**复用**既有连接（热 TLS/QUIC/TCP 池）与缓存，无冷启动；仅当某家线路切换时才对退役线路重建并延迟关闭旧连接。
 - acme 模式下证书由 acme.sh 自动续期，续期后通过 `--reloadcmd` 重启服务加载新证书。
 - 默认端口 443（DoH）/ 853（DoT、DoQ）/ 53（明文）均属特权端口（< 1024），需 root 运行；若改用非特权端口可非 root 运行。
+
+## 目录结构
+
+```text
+dnsproxy/
+├── cmd/dnsproxy/main.go        # 程序入口（组装各包、启动服务）
+├── internal/
+│   ├── config/                 # YAML 配置的加载与校验
+│   ├── ecs/                    # EDNS Client Subnet 策略
+│   ├── scheduler/              # 周期性探测 + 选路 + 赛马 + 缓存
+│   ├── handler/                # 把选路注入每个请求
+│   ├── cache/                  # 自建 DNS 响应缓存（TTL + 逐出策略）
+│   ├── bootstrap/              # 引导解析缓存 + 域名→IP 静态映射
+│   └── afp/                    # 地址族优先级（按延迟动态选族）
+├── config.example.yaml         # 配置示例（复制为 config.yaml 后使用）
+├── interactive-setup.sh        # 交互式部署脚本（服务器上运行）
+└── go.mod / go.sum
+```
