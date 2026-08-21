@@ -560,6 +560,9 @@ PROBE_INTERVAL="$(ask_duration "探测周期（如 15m/300s）" "15m")"
 PROBE_TIMEOUT="$(ask_duration "单次探测超时（如 3s）" "3s")"
 PROBE_COUNT="$(ask_int "每模式探测次数（取中位数）" "3" 1)"
 PROBE_DOMAIN="$(ask "探测用域名" "example.com.")"
+# 探测域名必须是完全限定域名（FQDN，以 . 结尾），否则 dnsproxy 打包查询时
+# 报 "domain must be fully qualified"。此处自动补尾点。
+PROBE_DOMAIN="${PROBE_DOMAIN%%.}."
 
 # --- 4. 缓存与引导 ---
 say ""
@@ -812,13 +815,24 @@ if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then
   # 上面的安装分支会被跳过，旧邮箱（可能仍是占位符 you@example.com）不会
   # 自动更新，导致 Let's Encrypt 以 invalidContact 拒绝。这里仅当现有邮箱
   # 为空或仍是占位符时才更新，避免覆盖机器上其他域名有意设置的提醒邮箱。
+  #
+  # 直接改写 account.conf 的 ACCOUNT_EMAIL（版本无关、最可靠）：--issue 在
+  # 自动注册账户时正是从这里读邮箱，改文件比依赖 --accountemail 参数更稳。
   acme_conf="${HOME}/.acme.sh/account.conf"
-  cur_email="$(sed -n "s/^ACCOUNT_EMAIL='\(.*\)'\$/\1/p" "$acme_conf" 2>/dev/null)"
+  cur_email="$(sed -n "s/^ACCOUNT_EMAIL=['\"]\?\([^'\"]*\)['\"]\?\$/\1/p" "$acme_conf" 2>/dev/null | head -1)"
   case "$cur_email" in
     ""|*example.com*)
-      "$ACME" --update-account --accountemail "$CERT_EMAIL" >/dev/null 2>&1 \
-        || "$ACME" --register-account --accountemail "$CERT_EMAIL" >/dev/null 2>&1 \
-        || true
+      if [ -f "$acme_conf" ]; then
+        if grep -q '^ACCOUNT_EMAIL=' "$acme_conf"; then
+          sed -i "s/^ACCOUNT_EMAIL=.*/ACCOUNT_EMAIL='$CERT_EMAIL'/" "$acme_conf"
+        else
+          echo "ACCOUNT_EMAIL='$CERT_EMAIL'" >> "$acme_conf"
+        fi
+        say "  已更新账户邮箱为 ${CERT_EMAIL}。"
+      fi
+      # 若账户此前已成功注册，则同步到 ACME 服务器端；未注册时 --issue 会用
+      # 上面改好的邮箱自动注册。失败静默，不影响后续签发。
+      "$ACME" --update-account --accountemail "$CERT_EMAIL" >/dev/null 2>&1 || true
       ;;
     *)
       say "  检测到已有账户邮箱 ${cur_email}，保持不变（不影响签发，仅影响到期提醒）。"
@@ -826,7 +840,8 @@ if [ "$NEEDS_TLS" = "true" ] && [ "$CERT_MODE" = "acme" ]; then
   esac
 
   # 签发：dns_<provider> 对应 acme.sh 内置的 dnsapi 脚本，凭证已 export 进环境。
-  "$ACME" --issue --dns "dns_${CERT_PROVIDER}" -d "$DOMAIN" --server letsencrypt
+  # 同时签发主域名与其通配符子域名 *.DOMAIN，便于客户端用任意子域名（www/dns/…）连接。
+  "$ACME" --issue --dns "dns_${CERT_PROVIDER}" -d "$DOMAIN" -d "*.$DOMAIN" --server letsencrypt
 
   # --issue 成功后把证书安装到 config.yaml 指定的目标路径。
   # 注意：--issue 签出的证书在 ~/.acme.sh/<domain>/，并不在目标路径，

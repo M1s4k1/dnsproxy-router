@@ -314,9 +314,12 @@ func (s *Scheduler) probeProvider(ctx context.Context, name string, modes map[st
 				fresh = true
 			}
 
-			rtt, ok := s.probeMode(ctx, u)
+			rtt, perr := s.probeMode(ctx, u)
+			if perr != nil {
+				s.logger.Warn("探测失败", "provider", name, "mode", mode, "addr", addr, "err", perr)
+			}
 			mu.Lock()
-			results = append(results, probeResult{mode: mode, addr: addr, upstream: u, rtt: rtt, ok: ok, fresh: fresh})
+			results = append(results, probeResult{mode: mode, addr: addr, upstream: u, rtt: rtt, ok: perr == nil, fresh: fresh})
 			mu.Unlock()
 		}(mode, addr)
 	}
@@ -333,27 +336,33 @@ func closeFresh(results []probeResult, keep upstream.Upstream) {
 	}
 }
 
-// probeMode 连续探测 ProbeCount 次，返回中位数 RTT；全部失败返回 ok=false。
-func (s *Scheduler) probeMode(_ context.Context, u upstream.Upstream) (rtt time.Duration, ok bool) {
+// probeMode 连续探测 ProbeCount 次，返回成功子集的中位数 RTT。容忍单次抖动：
+// 只要有一次成功即算可用；全部失败才返回首个错误，供上层打日志定位
+// （此前失败被静默吞掉，排障困难）。
+func (s *Scheduler) probeMode(_ context.Context, u upstream.Upstream) (rtt time.Duration, err error) {
 	// 各 provider/mode 的探测并发进行，Exchange 可能改写请求，故每 goroutine 用副本。
 	msg := s.probeMsg.Copy()
 	var rtts []time.Duration
+	var firstErr error
 
 	for i := 0; i < s.cfg.ProbeCount; i++ {
 		start := time.Now()
 		_, err := u.Exchange(msg)
 		elapsed := time.Since(start)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		rtts = append(rtts, elapsed)
 	}
 
 	if len(rtts) == 0 {
-		return 0, false
+		return 0, firstErr
 	}
 
-	return median(rtts), true
+	return median(rtts), nil
 }
 
 func selectSignature(selAddr map[string]string) string {
