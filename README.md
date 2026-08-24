@@ -51,6 +51,7 @@ dig @你的域名 example.com A
 - **动态择优**：周期性探测每家上游各模式的延迟，自动为每家选出延迟最低的模式。
 - **并发赛马**：每次查询向各家「当前最优线路」并发发出，支持「最快返回」与「加权 + 延时窗口」两种选择模式。
 - **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
+- **上游 DoH 自动 HTTP/3**：DoH 上游（`https://`）首次建连时并发探测 QUIC 与 TLS，QUIC 更快且可用则走 h3，否则自动降级 HTTP/2；连接建立后复用。
 - **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
 - **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
 - **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS（明文 IPv4/IPv6）。
@@ -82,7 +83,7 @@ dig @你的域名 example.com A
 | --- | --- | --- |
 | `use_domain` | 是否使用域名（证书申请） | `true` |
 | `domain` | 服务域名 | `example.com` |
-| `listeners.doh` | DoH 入站：`enabled` / `port`（443） / `path`（`/dns-query`） | 开启 |
+| `listeners.doh` | DoH 入站：`enabled` / `port`（443） / `path`（`/dns-query`） / `http3`（是否启用 HTTP/3，默认关） | 开启 |
 | `listeners.dot` | DoT 入站：`enabled` / `port`（853） | 关闭 |
 | `listeners.doq` | DoQ 入站：`enabled` / `port`（853） | 关闭 |
 | `listeners.plain_dns` | 明文 DNS 入站：`enabled` / `port`（53，UDP+TCP 同端口） | 关闭 |
@@ -141,6 +142,7 @@ listeners:
     enabled: true
     port: 443
     path: "/dns-query"   # 仅 DoH 使用，可自定义多层子路径
+    http3: false         # 是否同时启用 HTTP/3（QUIC/UDP，与 HTTP/2 同端口）
   dot:
     enabled: false
     port: 853
@@ -153,6 +155,7 @@ listeners:
 ```
 
 - 至少开启一种；`NeedsTLS`（DoH/DoT/DoQ 任一开启）时才需要配置 `cert`。
+- `doh.http3` 开启后，入站 DoH 在**同一个 IP:端口**上额外监听 HTTP/3（QUIC/UDP），与 HTTP/2 并存；客户端先走 HTTP/2 协商 `Alt-Svc` 再切 QUIC。需放行该端口的 **UDP**（仅 TCP 不够）。
 - 明文 DNS 属无加密、易被劫持，一般仅建议在内网/可信网络，或作为兜底使用。
 
 ### 响应缓存：过期时间与逐出策略
@@ -347,7 +350,7 @@ journalctl -u dnsproxy-router -f      # 实时日志
 systemctl restart dnsproxy-router     # 重启（改配置后）
 ```
 
-服务器防火墙 / 云安全组需放行你所开启协议的端口：DoH=`443/tcp`、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
+服务器防火墙 / 云安全组需放行你所开启协议的端口：DoH=`443/tcp`（开启 `http3` 时还需放行 `443/udp`）、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
 
 ## 说明
 

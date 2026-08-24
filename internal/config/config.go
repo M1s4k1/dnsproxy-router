@@ -49,6 +49,9 @@ type ListenerConfig struct {
 	Port int `yaml:"port"`
 	// Path: 仅 DoH 使用，为 DoH 端点请求路径。
 	Path string `yaml:"path"`
+	// HTTP3: 仅 DoH 使用，是否同时启用 HTTP/3（QUIC/UDP，与 HTTP/2 同端口）。
+	// 其余协议忽略本字段。
+	HTTP3 bool `yaml:"http3"`
 }
 
 // ListenersConfig 描述入站监听：DoH / DoT / DoQ / 明文 DNS（UDP+TCP）。

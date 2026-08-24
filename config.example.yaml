@@ -14,6 +14,7 @@ listeners:
     enabled: true
     port: 443
     path: "/dns-query"   # DoH 端点请求路径（可自定义，支持多层子路径）
+    http3: false         # 是否同时启用 HTTP/3（QUIC/UDP，与 HTTP/2 同端口）
   dot:
     enabled: false
     port: 853
@@ -103,6 +104,10 @@ race_window: 50ms
 # 上游服务商 → 查询模式 → 地址
 # 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
 # 地址格式：https://host/dns-query | tls://host:853 | quic://host:853 | udp://host:53
+#
+# 注意：DoH 上游（https://）默认会自动尝试 HTTP/3——首次建连时并发探测
+# QUIC 与 TLS，QUIC 更快且可用则走 h3，否则自动降级回 HTTP/2；连接建立后
+# 复用，跨请求保持热。无需在此额外配置。
 #
 # 必填：在此配置你自己的上游（每个服务商可配一种或多种模式）。
 # 把下面示例中的值替换成你的真实端点后取消注释：

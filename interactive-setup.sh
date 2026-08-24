@@ -440,6 +440,7 @@ if [ "$DOH_ENABLED" = "false" ] && [ "$DOT_ENABLED" = "false" ] && \
 fi
 
 DOH_PATH="/dns-query"
+DOH_HTTP3="false"
 if [ "$DOH_ENABLED" = "true" ]; then
   DOH_PATH="$(ask "DoH 端点路径（可自定义，支持多层，如 /dns/query/v1）" "/dns-query")"
   # 校验路径：以 / 开头且不以 / 结尾（根路径 / 除外）
@@ -449,6 +450,10 @@ if [ "$DOH_ENABLED" = "true" ]; then
   elif [ "$DOH_PATH" != "/" ] && [[ "$DOH_PATH" == */ ]]; then
     warn "路径不能以 / 结尾，已去掉末尾 /"
     DOH_PATH="${DOH_PATH%/}"
+  fi
+
+  if ask_yn "  DoH 同时启用 HTTP/3（QUIC/UDP，与 HTTP/2 同端口）" "n"; then
+    DOH_HTTP3="true"
   fi
 fi
 
@@ -743,6 +748,7 @@ listeners:
     enabled: ${DOH_ENABLED}
     port: ${DOH_PORT}
     path: "${DOH_PATH}"
+    http3: ${DOH_HTTP3}
   dot:
     enabled: ${DOT_ENABLED}
     port: ${DOT_PORT}

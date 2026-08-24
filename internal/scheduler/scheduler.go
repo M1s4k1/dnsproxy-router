@@ -230,6 +230,11 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		return
 	}
 
+	// 预热最终选中的各家上游：触发 DoH 客户端的 HTTP/3 竞速建连与连接池
+	// 初始化，避免首个真实请求承担建连延迟。探测阶段的 probeMode 已对全部
+	// 模式建连，此处仅对最终选路显式预热一次（热连接上近乎零成本）。
+	s.warmup(members)
+
 	var newCfg *proxy.CustomUpstreamConfig
 	if len(members) > 0 {
 		// 把「多家当前最优线路」收拢为一个聚合上游，交给库的单元素 exchange
@@ -408,4 +413,28 @@ func (s *Scheduler) wrapCached(u upstream.Upstream, shared *cache.Cache) upstrea
 		return u
 	}
 	return &cachingUpstream{upstream: u, cache: shared}
+}
+
+// warmup 对最终选中的各家上游并发做一次预热查询，触发 DoH 客户端的
+// HTTP/3 竞速建连与连接池初始化，避免首个真实请求承担建连延迟。预热失败
+// 不影响选路（探测阶段已判可用），仅记日志便于排障。
+func (s *Scheduler) warmup(members []racingMember) {
+	if len(members) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, m := range members {
+		wg.Add(1)
+		go func(m racingMember) {
+			defer wg.Done()
+			start := time.Now()
+			_, err := m.upstream.Exchange(s.probeMsg.Copy())
+			if err != nil {
+				s.logger.Debug("预热失败", "upstream", m.upstream.Address(), "err", err)
+				return
+			}
+			s.logger.Debug("预热完成", "upstream", m.upstream.Address(), "elapsed", time.Since(start).Round(time.Millisecond))
+		}(m)
+	}
+	wg.Wait()
 }

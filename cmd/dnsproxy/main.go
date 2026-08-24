@@ -77,6 +77,15 @@ func main() {
 		Bootstrap:  bootstrapResolver,
 		Timeout:    time.Duration(cfg.ProbeTimeout),
 		PreferIPv6: false,
+		// DoH 上游优先尝试 HTTP/3：首次建连时库会并发探测 QUIC 与 TLS，
+		// QUIC 更快且可用则走 h3，否则自动降级回 HTTP/2。探测后 client 被
+		// 缓存复用，连接跨请求保持热。该字段仅对 DoH（https://）生效，
+		// DoT/DoQ/Plain 直接忽略。
+		HTTPVersions: []upstream.HTTPVersion{
+			upstream.HTTPVersion3,
+			upstream.HTTPVersion2,
+			upstream.HTTPVersion11,
+		},
 	}
 
 	sched := scheduler.New(cfg, logger, baseOpts)
@@ -141,6 +150,8 @@ func main() {
 				ListenAddresses: []netip.AddrPort{ap},
 				ServerHeader:    "dnsproxy-router",
 				Routes:          []string{http.MethodGet + " " + ls.DoH.Path, http.MethodPost + " " + ls.DoH.Path},
+				// 入站 DoH 是否同时监听 HTTP/3（与 HTTP/2 同 IP:port，QUIC/UDP）。
+				HTTP3Enabled: ls.DoH.HTTP3,
 			}
 		}
 	}
