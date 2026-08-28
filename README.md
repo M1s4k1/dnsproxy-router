@@ -77,7 +77,7 @@ dig @你的域名 example.com A
 
 配置文件为 YAML（见 [config.example.yaml](config.example.yaml)）。交互脚本会引导你生成 `config.yaml`（默认路径 `/etc/dnsproxy/config.yaml`）；也可手动 `cp config.example.yaml config.yaml` 后编辑。关键字段：
 
-> 所有时长字段（`probe_interval`、`probe_timeout`、`cache_ttl`、`bootstrap_cache_ttl`、`ip_latency_interval`、`race_window`）支持单位 `ns` / `us` / `ms` / `s` / `m` / `h` / `d`（`d`=天，`1d`=24h），可组合如 `2d12h`、`2d12h30m`。
+> 所有时长字段（`probe_interval`、`probe_timeout`、`cache_ttl`、`cache_stale_max_age`、`cache_stale_answer_ttl`、`ttl_min`、`ttl_max`、`bootstrap_cache_ttl`、`ip_latency_interval`、`race_window`）支持单位 `ns` / `us` / `ms` / `s` / `m` / `h` / `d`（`d`=天，`1d`=24h），可组合如 `2d12h`、`2d12h30m`。
 
 | 字段 | 说明 | 默认 |
 | --- | --- | --- |
@@ -102,6 +102,10 @@ dig @你的域名 example.com A
 | `cache_size_bytes` | 响应缓存大小（仅开启时生效） | `67108864` |
 | `cache_ttl` | 缓存固定过期时间（`0s` 表示跟随记录自身 TTL） | `30m` |
 | `cache_eviction` | 逐出策略：`fifo` \| `lru` \| `lfu` | `lru` |
+| `cache_stale_max_age` | 乐观缓存窗口：过期后保留旧答案的时长（`0s` 关闭） | `0s` |
+| `cache_stale_answer_ttl` | 命中旧答案时返回客户端的短 TTL（`0s` 用默认 30s） | `0s` |
+| `ttl_min` | TTL 下限钳制：低于此值拉高（`0s` 不设） | `0s` |
+| `ttl_max` | TTL 上限钳制：高于此值压低（`0s` 不设） | `0s` |
 | `bootstrap` | 引导 DNS（明文） | `1.1.1.1:53, 8.8.8.8:53` |
 | `bootstrap_cache_ttl` | 引导解析结果缓存时长（`0s` 关闭） | `0s` |
 | `hosts` | 上游域名 → IP 静态映射（见下） | 空 |
@@ -158,9 +162,9 @@ listeners:
 - `doh.http3` 开启后，入站 DoH 在**同一个 IP:端口**上额外监听 HTTP/3（QUIC/UDP），与 HTTP/2 并存；客户端先走 HTTP/2 协商 `Alt-Svc` 再切 QUIC。需放行该端口的 **UDP**（仅 TCP 不够）。
 - 明文 DNS 属无加密、易被劫持，一般仅建议在内网/可信网络，或作为兜底使用。
 
-### 响应缓存：过期时间与逐出策略
+### 响应缓存：过期时间、逐出策略、乐观缓存与 TTL 覆写
 
-开启缓存后，除大小（`cache_size_bytes`）外还可配置两个维度：
+开启缓存后，除大小（`cache_size_bytes`）外还可配置过期时间、逐出策略、乐观缓存与 TTL 覆写：
 
 - **过期时间（`cache_ttl`）**：固定过期时间，如 `30m` / `1h` / `2d`。设 `0s` 表示不设固定值，跟随响应记录自身的 TTL。
 - **逐出策略（`cache_eviction`）**：缓存写满后，按哪种顺序淘汰旧条目：
@@ -171,11 +175,19 @@ listeners:
 | `lru` | 最近最少使用 | 最久未被访问的条目 |
 | `lfu` | 最不经常使用 | 访问次数最少的条目（同次数按插入先后） |
 
+- **乐观缓存（stale-while-revalidate）**：设 `cache_stale_max_age > 0` 后，条目过期但仍在窗口内时，先返回旧答案（TTL 由 `cache_stale_answer_ttl` 决定），同时后台异步回源刷新。这样「过期瞬间」不会引发缓存击穿，客户端也不用等上游往返。默认 `0s` 关闭。
+- **请求合并**：相同查询并发到达时，缓存层只向聚合上游发一份，其余等待共享结果，避免回源放大（缓存开启时始终生效，无需配置）。
+- **TTL 覆写（上下限钳制）**：`ttl_min` / `ttl_max` 对上游返回的记录 TTL 做钳制——低于 `ttl_min` 拉高、高于 `ttl_max` 压低，区间内保留原值。钳制后的 TTL 同时决定**返回给客户端的可见 TTL**与**缓存过期时间**（`cache_ttl` 为 `0s` 跟随记录 TTL 时）。`ttl_min` 可把上游返回的 0-TTL 记录拉高以便缓存；`ttl_max` 可防止超大 TTL 造成缓存污染。两者均 `0s` 表示不启用。
+
 ```yaml
 cache_enabled: true
 cache_size_bytes: 67108864
 cache_ttl: 30m
 cache_eviction: lru
+cache_stale_max_age: 1h     # 过期后保留旧答案 1 小时
+cache_stale_answer_ttl: 30s # 旧答案返回给客户端的短 TTL
+ttl_min: 60s                # 低于 60s 拉高（含 0-TTL）
+ttl_max: 3600s              # 高于 1h 压低
 ```
 
 - 命中缓存时，返回的响应各记录 TTL 会按剩余寿命递减；过期条目自动失效并重新向上游查询。

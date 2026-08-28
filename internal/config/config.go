@@ -95,6 +95,17 @@ type Config struct {
 	CacheTTL *Duration `yaml:"cache_ttl"`
 	// CacheEviction: 缓存逐出策略：fifo / lru / lfu。
 	CacheEviction string `yaml:"cache_eviction"`
+	// CacheStaleMaxAge: 乐观缓存窗口——条目过期后仍保留的时长（如 1h），过期
+	// 未超此时长的条目会先返回旧答案、后台回源刷新。0 表示不启用乐观缓存。
+	CacheStaleMaxAge Duration `yaml:"cache_stale_max_age"`
+	// CacheStaleAnswerTTL: 命中 stale 条目时返回给客户端的短 TTL；0 用默认 30s。
+	CacheStaleAnswerTTL Duration `yaml:"cache_stale_answer_ttl"`
+	// TTLMin: 上游记录 TTL 的下限钳制——低于此值拉高（如上游返回 0-TTL 时拉高
+	// 以便缓存）；0 表示不钳制。
+	TTLMin Duration `yaml:"ttl_min"`
+	// TTLMax: 上游记录 TTL 的上限钳制——高于此值压低（防止缓存污染过久）；
+	// 0 表示不钳制。
+	TTLMax Duration `yaml:"ttl_max"`
 	// Bootstrap: 解析上游主机名用的引导 DNS（明文）。
 	Bootstrap []string `yaml:"bootstrap"`
 	// BootstrapCacheTTL: 引导解析结果的缓存时长（0 表示不缓存）。
@@ -236,7 +247,13 @@ func DefaultConfig() Config {
 		CacheSizeBytes: 64 * 1024 * 1024,
 		CacheTTL:       durationPtr(30 * time.Minute),
 		CacheEviction:  "lru",
-		Bootstrap:      []string{"1.1.1.1:53", "8.8.8.8:53"},
+		// CacheStaleMaxAge 默认 0（不启用乐观缓存），需显式配置才启用。
+		CacheStaleMaxAge:    0,
+		CacheStaleAnswerTTL: 0,
+		// TTLMin/TTLMax 默认 0（不钳制），需显式配置才启用。
+		TTLMin:    0,
+		TTLMax:    0,
+		Bootstrap: []string{"1.1.1.1:53", "8.8.8.8:53"},
 		// Hosts 默认留空：域名→IP 静态映射属用户私密配置，请通过 config.yaml
 		// 或 interactive-setup.sh 自行填写。
 		Hosts: map[string][]string{},
@@ -370,6 +387,12 @@ func (c *Config) normalize() error {
 	case "fifo", "lru", "lfu":
 	default:
 		return fmt.Errorf("cache_eviction 必须为 fifo/lru/lfu，当前为 %q", c.CacheEviction)
+	}
+	if c.TTLMin < 0 || c.TTLMax < 0 {
+		return fmt.Errorf("ttl_min/ttl_max 不能为负")
+	}
+	if c.TTLMin > 0 && c.TTLMax > 0 && c.TTLMin > c.TTLMax {
+		return fmt.Errorf("ttl_min（%s）不能大于 ttl_max（%s）", c.TTLMin, c.TTLMax)
 	}
 	if len(c.Bootstrap) == 0 {
 		c.Bootstrap = []string{"1.1.1.1:53", "8.8.8.8:53"}

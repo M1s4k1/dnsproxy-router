@@ -33,6 +33,18 @@ type Config struct {
 	TTL time.Duration
 	// Eviction 是逐出策略，空值默认 LRU。
 	Eviction Policy
+	// StaleMaxAge 是条目过期后仍保留的最长时长（乐观缓存窗口）。过期未超此
+	// 窗口的条目可由 [Cache.GetStale] 返回、并触发后台回源；<=0 表示不启用
+	// 乐观缓存，过期即删除。
+	StaleMaxAge time.Duration
+	// StaleAnswerTTL 是命中 stale 条目时返回给客户端的短 TTL；<=0 用默认 30s。
+	StaleAnswerTTL time.Duration
+	// MinTTL 是上游记录 TTL 的下限钳制：低于此值拉高（如上游返回 0-TTL 时拉高
+	// 以便缓存）；0 表示不钳制。
+	MinTTL time.Duration
+	// MaxTTL 是上游记录 TTL 的上限钳制：高于此值压低（防止缓存污染过久）；
+	// 0 表示不钳制。
+	MaxTTL time.Duration
 }
 
 // entry 是单条缓存记录，同时维护各逐出策略所需的元数据。
@@ -41,6 +53,9 @@ type entry struct {
 	msg    *dns.Msg
 	size   int64
 	expire time.Time
+	// staleUntil 是条目彻底删除的时间点：过期（expire）后、未超 staleUntil
+	// 前，条目仍在、可由 GetStale 返回。未启用乐观缓存时恒等于 expire。
+	staleUntil time.Time
 
 	// freq 是访问次数（LFU 用）。
 	freq int64
@@ -71,6 +86,9 @@ func New(cfg Config) *Cache {
 	if cfg.Eviction == "" {
 		cfg.Eviction = LRU
 	}
+	if cfg.StaleAnswerTTL <= 0 {
+		cfg.StaleAnswerTTL = 30 * time.Second
+	}
 	return &Cache{
 		cfg:   cfg,
 		now:   time.Now,
@@ -81,6 +99,7 @@ func New(cfg Config) *Cache {
 
 // Get 返回 req 的缓存响应副本；未命中或已过期返回 nil。
 // 命中时会按剩余寿命改写响应各记录的 TTL，并把条目标记为「刚被访问」。
+// 已过期但仍在 stale 窗口内的条目不会被删除，可由 GetStale 返回。
 func (c *Cache) Get(req *dns.Msg) *dns.Msg {
 	if req == nil || len(req.Question) != 1 {
 		return nil
@@ -96,7 +115,9 @@ func (c *Cache) Get(req *dns.Msg) *dns.Msg {
 	}
 	now := c.now()
 	if now.After(e.expire) {
-		c.removeEntry(e)
+		if now.After(e.staleUntil) {
+			c.removeEntry(e)
+		}
 		return nil
 	}
 
@@ -107,9 +128,54 @@ func (c *Cache) Get(req *dns.Msg) *dns.Msg {
 	if remaining == 0 {
 		remaining = 1
 	}
+	// 钳上限：固定 TTL 模式下过期时间可能大于 MaxTTL，返回给客户端的剩余
+	// 寿命仍需不超过 MaxTTL。下限不钳——命中的剩余寿命随递减低于 MinTTL 属
+	// 正常 DNS 语义（MinTTL 只在写入时保证至少缓存这么久）。
+	if max := c.maxTTL(); max > 0 && remaining > max {
+		remaining = max
+	}
 	setTTL(resp, remaining)
 
 	return resp
+}
+
+// GetStale 返回已过期但仍在 stale 窗口内的条目响应副本，并把其 TTL 改写为
+// 短 StaleAnswerTTL，供「过期即回源」（stale-while-revalidate）使用。返回的
+// ok 为 true 表示命中 stale 条目；未启用乐观缓存、未命中或已彻底过期返回 false。
+func (c *Cache) GetStale(req *dns.Msg) (resp *dns.Msg, ok bool) {
+	if req == nil || len(req.Question) != 1 || c.cfg.StaleMaxAge <= 0 {
+		return nil, false
+	}
+	key := keyOf(req)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	e, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	now := c.now()
+	if now.Before(e.expire) {
+		// 仍新鲜，应走 Get 路径，此处不返回。
+		return nil, false
+	}
+	if now.After(e.staleUntil) {
+		c.removeEntry(e)
+		return nil, false
+	}
+
+	resp = e.msg.Copy()
+	ttl := uint32(c.cfg.StaleAnswerTTL.Seconds())
+	if ttl == 0 {
+		ttl = 1
+	}
+	if max := c.maxTTL(); max > 0 && ttl > max {
+		ttl = max
+	}
+	setTTL(resp, ttl)
+
+	return resp, true
 }
 
 // Set 将 resp 缓存到 req 对应的键下；不可缓存的响应会被忽略。
@@ -141,6 +207,42 @@ func (c *Cache) Set(req, resp *dns.Msg) {
 	c.insertEntry(key, resp, size, ttl)
 }
 
+// Clamp 原地把 resp 各记录（跳过 OPT）的 TTL 钳制到 [MinTTL, MaxTTL]，返回 resp
+// 本身。供回源路径在「返回给客户端」与「写入缓存」之前调用：钳制后的 TTL 既
+// 决定客户端可见 TTL，也（在跟随记录 TTL 模式下）决定缓存过期时间。未启用钳制
+// （MinTTL、MaxTTL 均为 0）时直接返回原 resp，零开销。
+func (c *Cache) Clamp(resp *dns.Msg) *dns.Msg {
+	if resp == nil {
+		return resp
+	}
+	min, max := c.minTTL(), c.maxTTL()
+	if min == 0 && max == 0 {
+		return resp
+	}
+	for _, rrset := range [][]dns.RR{resp.Answer, resp.Ns, resp.Extra} {
+		for _, rr := range rrset {
+			if rr.Header().Rrtype == dns.TypeOPT {
+				continue
+			}
+			ttl := rr.Header().Ttl
+			if min > 0 && ttl < min {
+				ttl = min
+			}
+			if max > 0 && ttl > max {
+				ttl = max
+			}
+			rr.Header().Ttl = ttl
+		}
+	}
+	return resp
+}
+
+// minTTL 返回 MinTTL 的秒数（0 表示未启用）。
+func (c *Cache) minTTL() uint32 { return uint32(c.cfg.MinTTL / time.Second) }
+
+// maxTTL 返回 MaxTTL 的秒数（0 表示未启用）。
+func (c *Cache) maxTTL() uint32 { return uint32(c.cfg.MaxTTL / time.Second) }
+
 // Len 返回当前条目数。
 func (c *Cache) Len() int {
 	c.mu.Lock()
@@ -167,13 +269,15 @@ func (c *Cache) Clear() {
 
 // insertEntry 在已持有锁的前提下插入新条目。
 func (c *Cache) insertEntry(key string, msg *dns.Msg, size int64, ttl time.Duration) {
+	now := c.now()
 	e := &entry{
-		key:     key,
-		msg:     msg.Copy(),
-		size:    size,
-		expire:  c.now().Add(ttl),
-		freq:    1,
-		heapIdx: -1,
+		key:        key,
+		msg:        msg.Copy(),
+		size:       size,
+		expire:     now.Add(ttl),
+		staleUntil: now.Add(ttl + c.cfg.StaleMaxAge),
+		freq:       1,
+		heapIdx:    -1,
 	}
 	c.items[key] = e
 	c.total += size
@@ -193,7 +297,9 @@ func (c *Cache) replaceEntry(e *entry, msg *dns.Msg, size int64, ttl time.Durati
 	c.total += size - e.size
 	e.msg = msg.Copy()
 	e.size = size
-	e.expire = c.now().Add(ttl)
+	now := c.now()
+	e.expire = now.Add(ttl)
+	e.staleUntil = now.Add(ttl + c.cfg.StaleMaxAge)
 	c.touch(e)
 }
 
@@ -285,6 +391,15 @@ func (h *lfuHeap) Pop() any {
 	e.heapIdx = -1
 	*h = old[:n-1]
 	return e
+}
+
+// Key 返回 req 的缓存键；req 必须为单问题，否则返回空串。供缓存层之外的
+// 调用方（如请求合并）复用与缓存一致的键，保证合并与缓存命中对齐。
+func Key(m *dns.Msg) string {
+	if m == nil || len(m.Question) != 1 {
+		return ""
+	}
+	return keyOf(m)
 }
 
 // keyOf 由请求构造缓存键：问题名（小写）+ QTYPE + QCLASS + DO 位 + ECS（若存在）。

@@ -248,9 +248,13 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		var finalUp upstream.Upstream = racing
 		if *s.cfg.CacheEnabled {
 			shared := cache.New(cache.Config{
-				MaxBytes: int64(s.cfg.CacheSizeBytes),
-				TTL:      time.Duration(*s.cfg.CacheTTL),
-				Eviction: cache.Policy(s.cfg.CacheEviction),
+				MaxBytes:       int64(s.cfg.CacheSizeBytes),
+				TTL:            time.Duration(*s.cfg.CacheTTL),
+				Eviction:       cache.Policy(s.cfg.CacheEviction),
+				StaleMaxAge:    time.Duration(s.cfg.CacheStaleMaxAge),
+				StaleAnswerTTL: time.Duration(s.cfg.CacheStaleAnswerTTL),
+				MinTTL:         time.Duration(s.cfg.TTLMin),
+				MaxTTL:         time.Duration(s.cfg.TTLMax),
 			})
 			finalUp = s.wrapCached(racing, shared)
 		}

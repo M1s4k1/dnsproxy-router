@@ -587,11 +587,31 @@ if ask_yn "开启 DNS 响应缓存（若客户端已做本地缓存，可关闭�
     3) CACHE_EVICTION="lfu" ;;
     *) CACHE_EVICTION="lru" ;;
   esac
+
+  if ask_yn "  开启乐观缓存（过期即回源，返回旧答案 + 后台刷新）" "n"; then
+    CACHE_STALE_MAX_AGE="$(ask_duration "    过期后保留旧答案的窗口（如 1h/12h）" "1h")"
+    CACHE_STALE_ANSWER_TTL="$(ask_duration "    旧答案返回给客户端的短 TTL（如 30s）" "30s")"
+  else
+    CACHE_STALE_MAX_AGE="0s"
+    CACHE_STALE_ANSWER_TTL="0s"
+  fi
+
+  if ask_yn "  开启 TTL 覆写（上下限钳制，同时影响缓存存储）" "n"; then
+    TTL_MIN="$(ask_duration "    TTL 下限（低于此值拉高，0s 表示不设）" "0s")"
+    TTL_MAX="$(ask_duration "    TTL 上限（高于此值压低，0s 表示不设）" "0s")"
+  else
+    TTL_MIN="0s"
+    TTL_MAX="0s"
+  fi
 else
   CACHE_ENABLED="false"
   CACHE_SIZE="0"
   CACHE_TTL="0s"
   CACHE_EVICTION="lru"
+  CACHE_STALE_MAX_AGE="0s"
+  CACHE_STALE_ANSWER_TTL="0s"
+  TTL_MIN="0s"
+  TTL_MAX="0s"
 fi
 
 BOOTSTRAP_INPUT="$(ask "引导 DNS（逗号分隔，用于解析上游域名）" "1.1.1.1:53,8.8.8.8:53")"
@@ -780,6 +800,10 @@ cache_enabled: ${CACHE_ENABLED}
 cache_size_bytes: ${CACHE_SIZE}
 cache_ttl: ${CACHE_TTL}
 cache_eviction: ${CACHE_EVICTION}
+cache_stale_max_age: ${CACHE_STALE_MAX_AGE}
+cache_stale_answer_ttl: ${CACHE_STALE_ANSWER_TTL}
+ttl_min: ${TTL_MIN}
+ttl_max: ${TTL_MAX}
 
 bootstrap:
 ${BOOTSTRAP_LIST}

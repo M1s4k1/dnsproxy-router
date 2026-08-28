@@ -159,3 +159,112 @@ func TestNonCacheable(t *testing.T) {
 		t.Fatal("不可缓存的响应不应入库")
 	}
 }
+
+func TestGetStale(t *testing.T) {
+	c := New(Config{
+		TTL:            30 * time.Second,
+		Eviction:       LRU,
+		StaleMaxAge:    time.Hour,
+		StaleAnswerTTL: 5 * time.Second,
+	})
+	base := time.Unix(1_700_000_000, 0)
+	now := base
+	c.now = func() time.Time { return now }
+
+	req := makeReq(nameA)
+	c.Set(req, makeResp(req))
+
+	// 未过期：GetStale 不返回，Get 正常命中。
+	if _, ok := c.GetStale(req); ok {
+		t.Fatal("未过期时 GetStale 不应命中 stale")
+	}
+	if c.Get(req) == nil {
+		t.Fatal("未过期时 Get 应命中")
+	}
+
+	// 过期但在窗口内：Get 返回 nil（但不删），GetStale 命中并给短 TTL。
+	now = base.Add(40 * time.Second)
+	if c.Get(req) != nil {
+		t.Fatal("已过期时 Get 应返回 nil")
+	}
+	if c.Len() != 1 {
+		t.Fatal("窗口内的 stale 条目不应被删除")
+	}
+	resp, ok := c.GetStale(req)
+	if !ok {
+		t.Fatal("窗口内应命中 stale")
+	}
+	if tt := resp.Answer[0].Header().Ttl; tt != 5 {
+		t.Fatalf("stale 响应 TTL 应为 5，得到 %d", tt)
+	}
+
+	// 超过窗口：彻底删除。
+	now = base.Add(2 * time.Hour)
+	if _, ok := c.GetStale(req); ok {
+		t.Fatal("超过窗口后不应命中 stale")
+	}
+	if c.Len() != 0 {
+		t.Fatal("超过窗口后条目应被删除")
+	}
+}
+
+func TestGetStaleDisabled(t *testing.T) {
+	c := New(Config{TTL: 30 * time.Second, Eviction: LRU, StaleMaxAge: 0})
+	base := time.Unix(1_700_000_000, 0)
+	now := base
+	c.now = func() time.Time { return now }
+
+	req := makeReq(nameA)
+	c.Set(req, makeResp(req))
+
+	now = base.Add(40 * time.Second)
+	if _, ok := c.GetStale(req); ok {
+		t.Fatal("未启用乐观缓存时不应命中 stale")
+	}
+	// 未启用 stale 时，过期条目的删除由 Get 负责。
+	if c.Get(req) != nil {
+		t.Fatal("已过期时 Get 应返回 nil")
+	}
+	if c.Len() != 0 {
+		t.Fatal("未启用乐观缓存时过期条目应由 Get 删除")
+	}
+}
+
+func TestClamp(t *testing.T) {
+	c := New(Config{TTL: time.Minute, Eviction: LRU, MinTTL: 60 * time.Second, MaxTTL: 300 * time.Second})
+	req := makeReq(nameA)
+	// 构造 TTL 分别为 10（低于 min）、120（区间内）、600（高于 max）的三条记录。
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Answer = []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 10}, A: net.IPv4(1, 2, 3, 4)},
+		&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 120}, A: net.IPv4(1, 2, 3, 5)},
+		&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 600}, A: net.IPv4(1, 2, 3, 6)},
+	}
+
+	got := c.Clamp(resp)
+	if got != resp {
+		t.Fatal("Clamp 应原地修改并返回同一指针")
+	}
+	ttls := []uint32{got.Answer[0].Header().Ttl, got.Answer[1].Header().Ttl, got.Answer[2].Header().Ttl}
+	want := []uint32{60, 120, 300}
+	for i := range ttls {
+		if ttls[i] != want[i] {
+			t.Fatalf("记录 %d TTL 应为 %d，得到 %d", i, want[i], ttls[i])
+		}
+	}
+}
+
+func TestClampDisabled(t *testing.T) {
+	c := New(Config{TTL: time.Minute, Eviction: LRU}) // MinTTL/MaxTTL 均为 0
+	req := makeReq(nameA)
+	resp := makeResp(req) // TTL=60
+
+	got := c.Clamp(resp)
+	if got != resp {
+		t.Fatal("未启用钳制时 Clamp 应返回原指针")
+	}
+	if got.Answer[0].Header().Ttl != 60 {
+		t.Fatalf("未启用钳制时 TTL 不应改变，得到 %d", got.Answer[0].Header().Ttl)
+	}
+}

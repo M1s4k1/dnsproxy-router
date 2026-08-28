@@ -53,6 +53,10 @@ cache_enabled: true        # 是否开启 DNS 响应缓存（false 关闭）
 cache_size_bytes: 67108864 # 缓存大小（字节），仅开启时生效
 cache_ttl: 30m             # 固定过期时间（如 30m/1h）；0s 表示跟随记录自身 TTL
 cache_eviction: lru        # 逐出策略：fifo（先进先出）| lru（最近最少用）| lfu（最不常用）
+cache_stale_max_age: 0s    # 乐观缓存窗口：过期后仍保留旧答案的时长（如 1h/12h）；0s 不启用
+cache_stale_answer_ttl: 0s # 命中旧答案时返回客户端的短 TTL；0s 用默认 30s
+ttl_min: 0s                # TTL 下限钳制：低于此值拉高（如 0s 表示不设）
+ttl_max: 0s                # TTL 上限钳制：高于此值压低（如 0s 表示不设）
 
 # 解析上游主机名用的引导 DNS（明文）
 bootstrap:
