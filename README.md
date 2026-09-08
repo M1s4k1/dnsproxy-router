@@ -52,7 +52,11 @@ dig @你的域名 example.com A
 - **并发赛马**：每次查询向各家「当前最优线路」并发发出，支持「最快返回」与「加权 + 延时窗口」两种选择模式。
 - **连接与缓存复用**：选路未变化时跨周期复用热连接池与缓存，无冷启动。
 - **上游 DoH 自动 HTTP/3**：DoH 上游（`https://`）首次建连时并发探测 QUIC 与 TLS，QUIC 更快且可用则走 h3，否则自动降级 HTTP/2；连接建立后复用。
+- **上游熔断**：某上游连续失败达到阈值即临时摘除、冷却后自动恢复，避免周期内反复打故障上游（快速失败）。
+- **/healthz 就绪探针**：独立 HTTP 端点，选路未就绪返回 503、就绪返回 200，供 systemd / 负载均衡 / 监控探活。
+- **SIGHUP 热重载**：改配置发 `SIGHUP` 即热切换调度器，不断服务、不丢在途请求。
 - **ECS 策略**：支持 `off`（移除）/ `pass`（透传）/ `override`（覆写）三种 EDNS Client Subnet 处理。
+- **DNSSEC 透传**：客户端请求带 DO 位时，向上游透传 DO 位并缓存 RRSIG 等签名记录（仅透传，不验证签名）。
 - **可自定义 DoH 路径**：DoH 端点路径可任意定制，支持多层子路径。
 - **多协议上游**：上游支持 DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS（明文 IPv4/IPv6）。
 
@@ -115,6 +119,10 @@ dig @你的域名 example.com A
 | `upstream_mode` | 查询结果赛马模式：`fastest` \| `weighted` | `fastest` |
 | `upstream_weights` | `weighted` 模式下各服务商权重（1-100），键为服务商名 | 空（默认 1） |
 | `race_window` | `weighted` 模式的延时窗口 | `50ms` |
+| `health_http` | `/healthz` 就绪探针监听地址（如 `127.0.0.1:8080`；留空禁用） | 空 |
+| `breaker_fail_threshold` | 上游熔断阈值：连续失败 N 次临时摘除（`0` 禁用） | `0`（禁用） |
+| `breaker_cooldown` | 熔断冷却时长，冷却后自动半开恢复 | `0s`（开启熔断时省略则回退 `30s`） |
+| `dnssec` | 客户端带 DO 时向上游透传 DO 位、缓存 RRSIG（仅透传不验证） | `false` |
 | `dns` | 上游服务商 map（见下） | 无（必填） |
 
 ### `cert.provider`：DNS API 提供商（DNS-01）
@@ -305,6 +313,7 @@ ecs:
 
 - `off` / `override` 模式下 ECS 是确定性的，缓存对所有客户端一致，安全。
 - `pass` 模式下 ECS 随客户端变化，会自动启用 subnet 缓存，避免不同地域客户端串缓存。
+- 注意：`dnssec: true` 时，向上游请求设的 DO 位在 `off` 模式下不会被剥掉——程序先做 ECS 处理再设 DO，两者互不干扰。
 
 ## 构建与发布
 
@@ -359,8 +368,12 @@ git push origin v1.0.0
 ```bash
 systemctl status dnsproxy-router      # 查看状态
 journalctl -u dnsproxy-router -f      # 实时日志
-systemctl restart dnsproxy-router     # 重启（改配置后）
+systemctl restart dnsproxy-router     # 重启（改监听/证书/ECS 配置后）
+systemctl reload dnsproxy-router      # 热重载（等价于 kill -HUP，见下）
+curl http://127.0.0.1:8080/healthz    # 就绪探针（需配置 health_http）
 ```
+
+**热重载（SIGHUP）**：改完 `config.yaml` 后执行 `systemctl reload dnsproxy-router`（或 `kill -HUP <pid>`），程序会重读配置、重建调度器，待新调度器完成首轮选路后才原子切换——不断服务、不丢在途请求。可热重载的字段：`dns`、缓存/熔断/探测/权重、`ip_priority`、`provider_ip_priority`、`hosts`、`bootstrap`。**不可**热重载的字段（需 `restart`）：`listeners`、`cert`、`ecs`、`health_http`、`dnssec`（前两者涉及监听端口 / TLS 证书，后两者涉及请求改写与探针监听，改动需重启进程生效）。热重载失败（配置非法，或新配置所有上游均不可用）会记日志并沿用旧配置。
 
 服务器防火墙 / 云安全组需放行你所开启协议的端口：DoH=`443/tcp`（开启 `http3` 时还需放行 `443/udp`）、DoT=`853/tcp`、DoQ=`853/udp`、明文 DNS=`53/udp+53/tcp`。
 

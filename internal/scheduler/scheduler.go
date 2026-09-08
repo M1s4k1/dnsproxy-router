@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AdguardTeam/dnsproxy/proxy"
@@ -54,6 +55,18 @@ type Scheduler struct {
 	signature string
 	live      map[string]upstream.Upstream
 	done      chan struct{}
+
+	// cancel 取消内部运行 context，由 Start 设置；cancelMu 保护其并发读写。
+	// grace 是 Retire 写入的优雅关停延迟（纳秒）：>0 时 Start 退出后延迟关闭
+	// 存活上游，给在途请求收尾时间；0 表示立即关闭。
+	// started 在 Start 写完 cancel 后关闭，供 Retire/Stop 等待，避免读到 nil
+	// cancel 而把取消静默丢弃；firstDone 在首轮探测完成时关闭，供热重载等待
+	// 新调度器完成首轮选路后再切换（否则切换后请求会回退占位上游）。
+	cancelMu  sync.Mutex
+	cancel    context.CancelFunc
+	grace     atomic.Int64
+	started   chan struct{}
+	firstDone chan struct{}
 }
 
 // New 构造调度器。base 为共享的基础上游选项，其 Bootstrap 是未包 Selector 的
@@ -69,6 +82,8 @@ func New(cfg config.Config, logger *slog.Logger, base *upstream.Options) *Schedu
 		current:      nil,
 		live:         make(map[string]upstream.Upstream),
 		done:         make(chan struct{}),
+		started:      make(chan struct{}),
+		firstDone:    make(chan struct{}),
 	}
 
 	for name := range cfg.DNS {
@@ -116,7 +131,14 @@ func newProbeMsg(domain string) *dns.Msg {
 
 // Start 启动调度循环：先立即探测一轮，之后按周期探测，退出时关闭所有存活上游。
 // 同时启动所有 per-provider 延迟探测器，并在退出前等待它们结束（保证 Stop 语义）。
-func (s *Scheduler) Start(ctx context.Context) {
+// parent 是进程级 context；调度器在内部派生可取消子 context，供 Stop/Retire 触发。
+func (s *Scheduler) Start(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	s.cancelMu.Lock()
+	s.cancel = cancel
+	s.cancelMu.Unlock()
+	close(s.started) // 通知 cancel 已就绪；Retire/Stop 等待此信号后再取 cancel
+
 	var wg sync.WaitGroup
 	for _, p := range s.probers {
 		wg.Add(1)
@@ -126,12 +148,19 @@ func (s *Scheduler) Start(ctx context.Context) {
 		}(p)
 	}
 
-	// defer 为 LIFO：执行顺序为 closeAllLive() → wg.Wait() → close(done)。
-	// 这样 Stop() 返回即代表调度循环与所有 prober 均已退出。
+	// defer 为 LIFO：执行顺序为 关存活上游（立即或延迟 grace）→ wg.Wait() →
+	// close(done)。这样 Stop() 返回即代表调度循环与所有 prober 均已退出。
 	defer func() { wg.Wait(); close(s.done) }()
-	defer s.closeAllLive()
+	defer func() {
+		if d := s.grace.Load(); d > 0 {
+			time.AfterFunc(time.Duration(d), s.closeAllLive)
+		} else {
+			s.closeAllLive()
+		}
+	}()
 
 	s.probeAndSelect(ctx)
+	close(s.firstDone) // 首轮探测完成（无论选路是否就绪）
 
 	ticker := time.NewTicker(time.Duration(s.cfg.ProbeInterval))
 	defer ticker.Stop()
@@ -146,9 +175,35 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 }
 
-// Stop 等待调度循环退出（退出时它自行关闭存活上游）。
+// Stop 触发取消并等待调度循环退出（退出时它自行关闭存活上游）。
 func (s *Scheduler) Stop() {
+	<-s.started // 等 Start 写完 cancel，避免读到 nil 取消
+	s.cancelMu.Lock()
+	cancel := s.cancel
+	s.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	<-s.done
+}
+
+// Retire 触发调度循环退出，但把存活上游的关闭延迟 delay 时间，给在途请求收尾。
+// 不阻塞；用于热重载时旧调度器优雅退役（新调度器接管后立即返回）。
+func (s *Scheduler) Retire(delay time.Duration) {
+	<-s.started // 等 Start 写完 cancel，避免读到 nil 取消
+	s.grace.Store(int64(delay))
+	s.cancelMu.Lock()
+	cancel := s.cancel
+	s.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// FirstDone 返回首轮探测完成的通知（无论选路是否就绪）。
+// 供热重载使用：新调度器完成首轮选路后再切换，避免切换后请求回退占位上游。
+func (s *Scheduler) FirstDone() <-chan struct{} {
+	return s.firstDone
 }
 
 // CurrentConfig 返回当前选路对应的 custom upstream 配置；首轮探测未完成时返回 nil。
@@ -242,6 +297,12 @@ func (s *Scheduler) probeAndSelect(ctx context.Context) {
 		// 并发查询并实现 fastest（谁先成功用谁）或 weighted（加权 + 延时窗口）。
 		weighted := s.cfg.UpstreamMode == "weighted"
 		racing := newRacing(members, weighted, time.Duration(s.cfg.RaceWindow))
+
+		// 熔断：连续失败达到阈值的成员在冷却期内不参与查询，实现周期内快速失败。
+		if s.cfg.BreakerFailThreshold > 0 {
+			racing.breaker = newBreaker(len(members), s.cfg.BreakerFailThreshold,
+				time.Duration(s.cfg.BreakerCooldown), s.logger)
+		}
 
 		// 缓存包在聚合层外层：一个请求先查缓存，未命中才并发查所有子并回填，
 		// 避免各上游重复查询。共享同一实例，跟随选路生命周期，选路变化时重建。

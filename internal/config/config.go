@@ -130,6 +130,17 @@ type Config struct {
 	// RaceWindow: weighted 模式的延时窗口（如 50ms）。第一个成功响应后，
 	// 窗口期内到达的成功响应均纳入候选，超时抛弃。
 	RaceWindow Duration `yaml:"race_window"`
+	// HealthHTTP: 健康检查 HTTP 监听地址（如 127.0.0.1:8080），提供 /healthz
+	// 就绪探针；空字符串表示禁用。
+	HealthHTTP string `yaml:"health_http"`
+	// BreakerFailThreshold: 上游熔断阈值——某成员连续失败达到此次数即临时摘除，
+	// 冷却期内不再调度（快速失败）；0 表示禁用熔断。
+	BreakerFailThreshold int `yaml:"breaker_fail_threshold"`
+	// BreakerCooldown: 熔断冷却时长，冷却到点后自动放行一次半开探测。
+	BreakerCooldown Duration `yaml:"breaker_cooldown"`
+	// DNSSEC: 是否向上游请求 DNSSEC 记录（在请求中设 DO 位）并缓存 RRSIG 等
+	// 签名记录；客户端带 DO 位查询时即可命中缓存返回签名记录。仅透传、不验证。
+	DNSSEC bool `yaml:"dnssec"`
 	// DNS: 上游服务商 → 查询模式 → 地址。
 	// 模式键形如 "DNS-over-HTTPS" / "DNS-over-TLS" / "DNS-over-QUIC" / "Plain DNS"。
 	DNS map[string]map[string]string `yaml:"dns"`
@@ -265,6 +276,14 @@ func DefaultConfig() Config {
 		UpstreamMode:    "fastest",
 		UpstreamWeights: map[string]int{},
 		RaceWindow:      Duration(50 * time.Millisecond),
+		// HealthHTTP 默认空（禁用 /healthz），需显式配置才启用。
+		HealthHTTP: "",
+		// 熔断默认关闭（阈值 0 = 禁用）。省略 breaker_fail_threshold 字段时，
+		// yaml 反序列化得到零值 0，与「默认禁用」一致；需显式配置阈值才启用。
+		BreakerFailThreshold: 0,
+		BreakerCooldown:      Duration(0),
+		// DNSSEC 默认关闭：仅透传、不验证，需显式开启。
+		DNSSEC: false,
 		// BootstrapCacheTTL 默认 0（不缓存），需显式配置才缓存。
 		// DNS 默认留空：上游端点属用户私密配置，请通过 config.yaml 或
 		// interactive-setup.sh 自行填写（空值会被 LoadConfig 校验拒绝）。
@@ -431,6 +450,24 @@ func (c *Config) normalize() error {
 	}
 	if c.RaceWindow <= 0 {
 		c.RaceWindow = Duration(50 * time.Millisecond)
+	}
+	if c.HealthHTTP != "" {
+		// 用 net.SplitHostPort 校验，与 main.go 里 net.Listen 接受的格式一致：
+		// 接受 "host:port"（含 "localhost:8080"）与 ":8080"（监听所有接口）。
+		if _, _, err := net.SplitHostPort(c.HealthHTTP); err != nil {
+			return fmt.Errorf("health_http 非法 %q: %w", c.HealthHTTP, err)
+		}
+	}
+	if c.BreakerFailThreshold < 0 {
+		return fmt.Errorf("breaker_fail_threshold 不能为负，当前为 %d", c.BreakerFailThreshold)
+	}
+	if c.BreakerCooldown < 0 {
+		return fmt.Errorf("breaker_cooldown 不能为负，当前为 %s", c.BreakerCooldown)
+	}
+	if c.BreakerFailThreshold > 0 && c.BreakerCooldown == 0 {
+		// 熔断开启但冷却为 0：无冷却期会导致上游被摘除后立即半开放行、
+		// 打故障上游，故回退默认 30s 冷却。
+		c.BreakerCooldown = Duration(30 * time.Second)
 	}
 	for name, w := range c.UpstreamWeights {
 		if name == "" {

@@ -753,6 +753,25 @@ esac
 IP_PRIORITY="ipv4"
 [ -z "$IP_LATENCY_INTERVAL" ] && IP_LATENCY_INTERVAL="15m"
 
+# 健康检查 /healthz 就绪探针：留空表示不启用。
+HEALTH_HTTP="$(ask "健康检查监听地址（如 127.0.0.1:8080；留空不启用）" "")"
+
+# 上游熔断：连续失败 N 次临时摘除，冷却后自动恢复。
+if ask_yn "开启上游熔断（连续失败临时摘除 + 冷却自动恢复）" "y"; then
+  BREAKER_FAIL_THRESHOLD="$(ask_int "熔断阈值（连续失败多少次触发）" "3" 1)"
+  BREAKER_COOLDOWN="$(ask_duration "熔断冷却时长（如 30s/1m）" "30s")"
+else
+  BREAKER_FAIL_THRESHOLD="0"
+  BREAKER_COOLDOWN="0s"
+fi
+
+# DNSSEC 透传：向上游设 DO 位、缓存 RRSIG，仅透传不验证。
+if ask_yn "开启 DNSSEC 透传（缓存签名记录，客户端带 DO 查询时返回）" "n"; then
+  DNSSEC="true"
+else
+  DNSSEC="false"
+fi
+
 # --- 6. 生成 config.yaml ---
 say ""
 info "【6/6】生成配置并部署"
@@ -815,6 +834,10 @@ provider_ip_priority:
 ${PROVIDER_PRIORITY_BLOCK}
 upstream_mode: ${UPSTREAM_MODE}
 ${WEIGHTS_YAML}race_window: ${RACE_WINDOW}
+health_http: "${HEALTH_HTTP}"
+breaker_fail_threshold: ${BREAKER_FAIL_THRESHOLD}
+breaker_cooldown: ${BREAKER_COOLDOWN}
+dnssec: ${DNSSEC}
 
 dns:
 ${DNS_BLOCK}

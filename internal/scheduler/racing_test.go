@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,6 +111,65 @@ func TestWeightedTiePicksFastest(t *testing.T) {
 
 	if got := chosenID(t, r); got != "b" {
 		t.Fatalf("权重相同时应选最快 b，得到 %q", got)
+	}
+}
+
+// countingUpstream 统计 Exchange 调用次数，可配置返回错误，用于验证熔断剔除。
+type countingUpstream struct {
+	id    string
+	fail  bool
+	delay time.Duration
+	calls atomic.Int32
+}
+
+func (c *countingUpstream) Exchange(req *dns.Msg) (*dns.Msg, error) {
+	c.calls.Add(1)
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	if c.fail {
+		return nil, errors.New("模拟上游失败")
+	}
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Answer = append(resp.Answer, &dns.TXT{
+		Hdr: dns.RR_Header{Name: "id.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+		Txt: []string{c.id},
+	})
+	return resp, nil
+}
+
+func (c *countingUpstream) Address() string { return c.id }
+func (c *countingUpstream) Close() error    { return nil }
+
+// TestBreakerSkipsOpenedMember 验证熔断生效：某成员连续失败达阈值后不再被调用，
+// 健康成员仍正常参与。
+func TestBreakerSkipsOpenedMember(t *testing.T) {
+	bad := &countingUpstream{id: "bad", fail: true}
+	good := &countingUpstream{id: "good", delay: 20 * time.Millisecond} // 让 bad 的失败路径每次都在 good 返回前跑完
+
+	r := newRacing([]racingMember{
+		{weight: 1, upstream: bad},
+		{weight: 1, upstream: good},
+	}, false, 0)
+	r.breaker = newBreaker(2, 2, time.Hour, nil) // 阈值 2，冷却 1h（测试期间不会恢复）
+
+	// 前两次：bad 各失败一次（第 2 次失败后 report 熔断）。good 均成功，返回 good。
+	for i := 0; i < 2; i++ {
+		if got := chosenID(t, r); got != "good" {
+			t.Fatalf("第 %d 次应选 good，得到 %q", i+1, got)
+		}
+	}
+	if bad.calls.Load() != 2 {
+		t.Fatalf("前两次 bad 应被调用 2 次，实际 %d", bad.calls.Load())
+	}
+
+	// 第三次：bad 已熔断被剔除，不再调用；仅 good 参与。
+	if got := chosenID(t, r); got != "good" {
+		t.Fatalf("熔断后应选 good，得到 %q", got)
+	}
+	if bad.calls.Load() != 2 {
+		t.Fatalf("熔断后 bad 不应再被调用，实际 %d", bad.calls.Load())
 	}
 }
 

@@ -658,3 +658,134 @@ func TestUpstreamTargets(t *testing.T) {
 		t.Fatalf("IP 主机不应出现在探测目标中")
 	}
 }
+
+func TestLoadConfigBreakerFields(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+health_http: "127.0.0.1:8080"
+breaker_fail_threshold: 5
+breaker_cooldown: 1m
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.HealthHTTP != "127.0.0.1:8080" {
+		t.Fatalf("HealthHTTP 解析错误: %q", c.HealthHTTP)
+	}
+	if c.BreakerFailThreshold != 5 {
+		t.Fatalf("BreakerFailThreshold 解析错误: %d", c.BreakerFailThreshold)
+	}
+	if c.BreakerCooldown.String() != "1m0s" {
+		t.Fatalf("BreakerCooldown 解析错误: %s", c.BreakerCooldown)
+	}
+}
+
+func TestLoadConfigBreakerDefaults(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+breaker_fail_threshold: 3
+breaker_cooldown: 0s
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if c.BreakerCooldown.String() != "30s" {
+		t.Fatalf("阈值开启但冷却为 0 时应回退 30s，得到 %s", c.BreakerCooldown)
+	}
+}
+
+func TestLoadConfigBadHealthHTTP(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+health_http: "not-an-addr"
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("非法 health_http 应报错")
+	}
+}
+
+func TestLoadConfigNegativeBreakerThreshold(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+breaker_fail_threshold: -1
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig("/tmp/ecs_test_config.yaml"); err == nil {
+		t.Fatalf("负熔断阈值应报错")
+	}
+}
+
+func TestLoadConfigDNSSEC(t *testing.T) {
+	y := `
+listeners:
+  doh:
+    enabled: true
+cert:
+  mode: "acme"
+  cert_path: "/tmp/a.pem"
+  key_path: "/tmp/b.pem"
+dnssec: true
+dns:
+  cf:
+    DNS-over-HTTPS: "https://example.com/dns-query"
+`
+	if err := writeTemp(y); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig("/tmp/ecs_test_config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig 失败: %v", err)
+	}
+	if !c.DNSSEC {
+		t.Fatalf("dnssec: true 应被解析为开启")
+	}
+}

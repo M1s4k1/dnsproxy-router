@@ -24,6 +24,8 @@ type racingUpstream struct {
 	members  []racingMember
 	window   time.Duration
 	weighted bool
+	// breaker 非 nil 时启用熔断：连续失败的成员在冷却期内不参与查询。
+	breaker *breaker
 }
 
 // racingResult 是单个上游的并发查询结果。
@@ -52,19 +54,41 @@ func (r *racingUpstream) Exchange(req *dns.Msg) (*dns.Msg, error) {
 	}
 }
 
+// candidates 返回本轮应参与查询的成员下标：无熔断时全量；否则剔除已熔断成员。
+func (r *racingUpstream) candidates() []int {
+	if r.breaker == nil {
+		idx := make([]int, len(r.members))
+		for i := range r.members {
+			idx[i] = i
+		}
+		return idx
+	}
+	return r.breaker.pick(len(r.members))
+}
+
+// report 把成员 i 的一次结果上报给熔断器（未启用熔断时为 no-op）。
+func (r *racingUpstream) report(i int, err error) {
+	if r.breaker != nil {
+		r.breaker.report(i, err)
+	}
+}
+
 // exchangeFastest 谁先成功返回用谁（所有上游均失败则返回错误）。
 func (r *racingUpstream) exchangeFastest(req *dns.Msg) (*dns.Msg, error) {
-	resCh := make(chan racingResult, len(r.members))
-	for _, m := range r.members {
-		go func(m racingMember) {
+	idx := r.candidates()
+	resCh := make(chan racingResult, len(idx))
+	for _, i := range idx {
+		m := r.members[i]
+		go func(i int, m racingMember) {
 			start := time.Now()
 			resp, err := m.upstream.Exchange(req.Copy())
+			r.report(i, err)
 			resCh <- racingResult{weight: m.weight, resp: resp, err: err, elapsed: time.Since(start)}
-		}(m)
+		}(i, m)
 	}
 
 	var lastErr error
-	for range r.members {
+	for range idx {
 		res := <-resCh
 		if res.err == nil && res.resp != nil {
 			return res.resp, nil
@@ -82,18 +106,21 @@ func (r *racingUpstream) exchangeFastest(req *dns.Msg) (*dns.Msg, error) {
 // exchangeWeighted 在首个成功响应后开启窗口期，收集窗口内的所有成功响应，
 // 窗口一到即返回，不再等待尚未返回的上游。
 func (r *racingUpstream) exchangeWeighted(req *dns.Msg) (*dns.Msg, error) {
-	resCh := make(chan racingResult, len(r.members))
-	for _, m := range r.members {
-		go func(m racingMember) {
+	idx := r.candidates()
+	resCh := make(chan racingResult, len(idx))
+	for _, i := range idx {
+		m := r.members[i]
+		go func(i int, m racingMember) {
 			start := time.Now()
 			resp, err := m.upstream.Exchange(req.Copy())
+			r.report(i, err)
 			resCh <- racingResult{weight: m.weight, resp: resp, err: err, elapsed: time.Since(start)}
-		}(m)
+		}(i, m)
 	}
 
 	var cands []racingResult
 	var timer *time.Timer
-	remaining := len(r.members)
+	remaining := len(idx)
 
 	for remaining > 0 {
 		if timer == nil {

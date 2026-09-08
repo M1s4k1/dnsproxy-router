@@ -105,6 +105,21 @@ upstream_weights: {}
 # weighted 模式的延时窗口（首个响应后等待多久，超时响应抛弃）
 race_window: 50ms
 
+# 健康检查 HTTP 监听地址，提供 /healthz 就绪探针（选路未就绪返回 503）。
+# 留空 "" 表示不启用。注意：此字段不可热重载，改动需 restart。
+health_http: ""
+
+# 上游熔断：某成员连续失败达到阈值即临时摘除、冷却后自动恢复（快速失败）。
+# breaker_fail_threshold 为 0 表示禁用熔断（默认）。开启示例：
+#   breaker_fail_threshold: 3
+#   breaker_cooldown: 30s
+breaker_fail_threshold: 0
+breaker_cooldown: 0s
+
+# DNSSEC：客户端请求带 DO 位时向上游透传 DO 位、缓存 RRSIG 等签名记录。
+# 仅透传、不验证签名。false 关闭。注意：此字段不可热重载，改动需 restart。
+dnssec: false
+
 # 上游服务商 → 查询模式 → 地址
 # 模式键：DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC / Plain DNS
 # 地址格式：https://host/dns-query | tls://host:853 | quic://host:853 | udp://host:53
